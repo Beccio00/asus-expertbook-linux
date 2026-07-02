@@ -1,0 +1,57 @@
+From: burakgon <burakgon12@gmail.com>
+Subject: [PATCH] soundwire: dmi-quirks: Disable ghost rt722 on ASUS ExpertBook B9406CAA
+
+The 2026 ASUS ExpertBook Ultra B9406CAA (Panther Lake, PCI audio subsystem
+0x1043:0x15e4) advertises a phantom Realtek rt722 on SoundWire link 3
+(_ADR 0x000330025d072201, status UNATTACHED) next to the real Cirrus
+CS42L43. Both expose a JACK playback DAI, so the function-topology card
+builder in sof_sdw creates two DAI links with the byte-identical name
+"SDW3-Playback-SimpleJack":
+
+  sysfs: cannot create duplicate filename '.../sof_sdw/SDW3-Playback-SimpleJack'
+  kobject_add_internal failed for SDW3-Playback-SimpleJack with -EEXIST
+  sof_sdw sof_sdw: probe with driver sof_sdw failed with error -12
+
+The card never registers (empty /proc/asound/cards) and there is no audio.
+On 7.0.x the static topology path did not trip on the ghost; the 7.1
+function-topology builder does, because it builds the card from the
+ACPI-declared functions.
+
+This is the exact failure mode a5bec626b985 ("soundwire: dmi-quirks:
+Disable ghost Realtek devices") addresses. The ghost's _ADR is identical
+to the one already remapped for the ASUS UX5406AA and the two Lenovo
+models, so reuse the existing ghost_realtek adr_remap and only add the
+B9406CAA DMI match.
+
+Tested on:
+  - ASUS ExpertBook Ultra B9406CAA (Panther Lake, Core Ultra X7 358H)
+  - Linux 7.1.x (CachyOS) with linux-firmware-cirrus providing the
+    per-OEM cs35l56-b0-dsp1-misc-104315e4-l2u{0,1}.{wmfw,bin}
+
+After the remap the ghost is skipped in drivers/soundwire/slave.c
+(if (!addr) return false), leaving a single SDW3 jack; sof_sdw then
+probes cleanly and all six speakers plus the headphone jack come up
+through the standard HiFi UCM path.
+
+Signed-off-by: burakgon <burakgon12@gmail.com>
+---
+ drivers/soundwire/dmi-quirks.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/soundwire/dmi-quirks.c b/drivers/soundwire/dmi-quirks.c
+--- a/drivers/soundwire/dmi-quirks.c
++++ b/drivers/soundwire/dmi-quirks.c
+@@ -185,6 +185,13 @@ static const struct dmi_system_id adr_remap_quirk_table[] = {
+ 		},
+ 		.driver_data = (void *)ghost_realtek,
+ 	},
++	{
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUS"),
++			DMI_MATCH(DMI_BOARD_NAME, "B9406CAA"),
++		},
++		.driver_data = (void *)ghost_realtek,
++	},
+ 	{
+ 		.matches = {
+ 			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),

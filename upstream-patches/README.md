@@ -1,14 +1,14 @@
 # Upstream patches
 
-Three submission-ready patches that bring this ASUS B9406CAA into the
+Four submission-ready patches that bring this ASUS B9406CAA into the
 existing upstream quirk infrastructure — same shape as the entries
 already shipped for Dell, Lenovo, and other ASUS models.
 
-When all three land upstream, the corresponding modules in this repo
-(`display-fix`, `audio-fix`, `touchpad-fix`) become redundant and
-deletable.
+When all four land upstream, the corresponding modules in this repo
+(`display-fix`, `audio-fix`, `touchpad-fix`) and the out-of-tree
+`soundwire-intel` ghostfix DKMS module become redundant and deletable.
 
-## The three patches
+## The four patches
 
 ### `0001-drm-i915-Add-Panel-Replay-quirk-for-ASUS-ExpertBook-.patch`
 
@@ -17,9 +17,9 @@ deletable.
 - **What it does:** adds an `intel_dpcd_quirks[]` entry for PCI subsystem
   `0x1043:0x15e4` + panel sink IEEE OUI `0x00:0xaa:0x01` calling
   `quirk_disable_edp_panel_replay`. Same shape as the existing Dell XPS
-  14 DA14260 entry. Reading `drm-intel-next` confirms upstream is also
-  growing this list with more per-device disables (Dell XPS 16 DA16260
-  recently added) — there is no "make Panel Replay actually work"
+  14 DA14260 / XPS 16 DA16260 entries (both now in mainline) — upstream
+  keeps growing this list with per-device disables; there is no "make
+  Panel Replay actually work"
   upstream patch, even from Intel's own engineers ("disabled by default,
   at least until the underlying issue can be sorted out", per Phoronix
   for the Dell entry).
@@ -55,11 +55,35 @@ deletable.
   every libinput consumer reads `local-overrides.quirks` on every
   device-open path.
 
+### `0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch`
+
+- **Tree:** `torvalds/linux` → `drivers/soundwire/dmi-quirks.c`
+- **Mailing list:** `linux-sound@vger.kernel.org` (Cc: `alsa-devel@alsa-project.org`)
+- **What it does:** adds a `DMI_MATCH(DMI_SYS_VENDOR "ASUS", DMI_BOARD_NAME
+  "B9406CAA")` entry to `adr_remap_quirk_table[]` pointing at the existing
+  `ghost_realtek` `adr_remap`, which remaps the phantom rt722 `_ADR`
+  `0x000330025d072201` → `0` so the SoundWire core skips it. This is the
+  fix that lets the card probe at all — **distinct from `0002`**, which
+  only un-silences a card that already probed. The `ghost_realtek` array
+  and its infra come from a5bec626b985 ("soundwire: dmi-quirks: Disable
+  ghost Realtek devices"), which landed in mainline **after 7.1** (in the
+  7.2 merge window) and covers ASUS UX5406AA + Lenovo 83QK/83SF but **not**
+  the B9406CAA. Verified against `torvalds/linux` master: the block exists,
+  our board does not — so this one-entry addition is all that is needed.
+- **Without it:** on 7.1's function-topology card builder the ghost rt722
+  produces a duplicate `SDW3-Playback-SimpleJack` DAI →
+  `kobject_add -EEXIST` → `sof_sdw probe -12` → empty `/proc/asound/cards`.
+- **Replaces:** the out-of-tree `soundwire-intel-b9406-ghostfix` DKMS
+  module (which vendors the whole `soundwire-intel.ko` just to carry this
+  one remap). Once this lands on your running kernel, `dkms remove
+  soundwire-intel-b9406-ghostfix/0.1 --all`.
+
 ## Other research findings (not new patches, but relevant)
 
 | Question | Finding |
 |---|---|
 | Is there a `sof_sdw` patch elsewhere in mainline that might already match us by SSID? | No. Searched master + drm-intel-next + linux-next. `0x15e4` / `B9406CAA` / `EXPERTBOOK` appear nowhere in upstream kernel. |
+| Did the ghost-Realtek disable (a5bec626b985) reach a kernel that covers us? | The `ghost_realtek` `adr_remap` + `adr_remap_quirk_table` infra is in mainline **master (7.2-dev)** but **not** in `v7.1` or `linux-7.1.y` stable (verified by inspecting `drivers/soundwire/dmi-quirks.c` at both refs). Even in master it matches only ASUS UX5406AA + Lenovo 83QK/83SF — **no B9406CAA**. So `0004` is required even after moving to 7.2; until it lands, the DKMS ghostfix stays. |
 | Is there a kernel-level "make Panel Replay work on Dell" patch we missed? | No. Confirmed by reading `drm-intel-next` `intel_quirks.c` — that branch is *adding more* per-device disable entries (Dell XPS 16 DA16260), not enabling Panel Replay. Phoronix coverage of the Linux 7.1 patch is explicit: "disabled by default, at least until the underlying issue can be sorted out". |
 | Is there a generic upstream Wi-Fi 7 BE211 fix Omarchy bundles that we should mirror? | Omarchy's fix is **not** a kernel patch — it's the same `options iwlwifi disable_11be=Y` modprobe drop-in this repo's `wifi-fix` now ships. EHT/802.11be is broken on BE211 and there is no upstream EHT fix in mainline `iwlwifi`/`iwlmld` as of 7.1-rc7, so disabling EHT (Wi-Fi 6 fallback) is the current best practice on both. |
 | Has `linux-firmware-cirrus` shipped our subsystem ID? | **Yes, in `20260410-1` (extra/core repo).** Older `1:20260309-1` (cachyos epoch) does not. The newer package contains: `cs35l56-b0-dsp1-misc-104315e4-l2u{0,1}.bin.zst` plus a `cs35l56-b0-dsp1-misc-104315e4.wmfw.zst` symlink → `cs35l56/CS35L56_Rev3.13.4.wmfw.zst`. The shipping content is byte-identical to the files audio-fix carries (verified via sha256). When CachyOS bumps their epoch to `1:20260410+`, the firmware blobs in `audio-fix/` become redundant and the module can shed them. |
@@ -84,25 +108,28 @@ The libinput patch needs no rebuild — just place the new section into
 `touchpad-fix` (and `libinput quirks list /dev/input/event9` confirms
 it's loaded).
 
-The two kernel patches need a rebuild. With the CachyOS kernel sources
-cloned (e.g. under `~/Developers/kernel-build/linux-cachyos/`), the
-PKGBUILD's `prepare()` already loops over every `*.patch` in `source=`
-and applies it, so adding our two patches to the source array is all
-that's needed.
+The three kernel patches (`0001`, `0002`, `0004`) need a rebuild. With the
+CachyOS kernel sources cloned (e.g. under
+`~/Developers/kernel-build/linux-cachyos/`), the PKGBUILD's `prepare()`
+already loops over every `*.patch` in `source=` and applies it, so adding
+our patches to the source array is all that's needed.
 
 ```sh
 cd ~/Developers/kernel-build/linux-cachyos/linux-cachyos
-cp ~/Developers/asus-expertbook-linux/upstream-patches/000{1,2}*.patch .
-# Edit PKGBUILD: append the two filenames to the source=() array
+cp ~/Developers/asus-expertbook-linux/upstream-patches/000{1,2,4}*.patch .
+# Edit PKGBUILD: append the three filenames to the source=() array
 # Then:
 makepkg -si           # ~30-60 minutes; installs at the end
 sudo reboot
 # Boot and verify:
 ./patch.sh status display-fix      # cmdline marker no longer needed
 ./patch.sh status audio-fix        # Pro Audio pin no longer needed
+cat /proc/asound/cards             # 0004: card present without the DKMS ghostfix
+dmesg | grep -i remapped           # 0004: "remapped _ADR 0x...072201 as 0x0"
 ```
 
-If both work, remove our local workarounds and submit the patches to
+If they all work, remove our local workarounds (including `dkms remove
+soundwire-intel-b9406-ghostfix/0.1 --all`) and submit the patches to
 their respective mailing lists.
 
 ## How to submit (once verified)

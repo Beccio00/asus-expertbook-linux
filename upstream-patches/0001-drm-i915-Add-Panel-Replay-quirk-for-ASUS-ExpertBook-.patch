@@ -11,14 +11,14 @@ the xe display engine. dmesg shows:
 and KWin reports "Pageflip timed out! This is a bug in the xe kernel
 driver" until the internal panel goes black; only a reboot recovers it.
 
-Mirror the existing quirk for the Dell XPS 14 DA14260 (which has the same
-class of problem) for this ASUS subsystem. The panel reports IEEE OUI
-00:aa:01 in DPCD register 0x300, and the laptop's PCI subsystem
-identifier is 0x1043:0x15e4.
+Mirror the existing quirk for the Dell XPS 14 DA14260 / XPS 16 DA16260
+(which have the same class of problem) for this ASUS subsystem. The panel
+reports IEEE OUI 00:aa:01 in DPCD register 0x300, and the laptop's PCI
+subsystem identifier is 0x1043:0x15e4.
 
 Tested on:
   - ASUS ExpertBook Ultra B9406CAA, Panther Lake Core Ultra X7
-  - Linux 7.0.x and 7.1-rc1 (CachyOS variants)
+  - Linux 7.0.x and 7.1.x (CachyOS variants)
   - eDP panel: Samsung Display Corp ("SDC") product 0x4217
 
 Without this patch the laptop's only workaround is xe.enable_psr=0 on
@@ -33,7 +33,7 @@ Signed-off-by: burakgon <burakgon12@gmail.com>
 diff --git a/drivers/gpu/drm/i915/display/intel_quirks.c b/drivers/gpu/drm/i915/display/intel_quirks.c
 --- a/drivers/gpu/drm/i915/display/intel_quirks.c
 +++ b/drivers/gpu/drm/i915/display/intel_quirks.c
-@@ -270,6 +270,14 @@ static const struct intel_dpcd_quirk intel_dpcd_quirks[] = {
+@@ -286,6 +286,14 @@ static const struct intel_dpcd_quirk intel_dpcd_quirks[] = {
  		.sink_oui = SINK_OUI(0x00, 0x22, 0xb9),
  		.hook = quirk_disable_edp_panel_replay,
  	},
@@ -46,5 +46,5 @@ diff --git a/drivers/gpu/drm/i915/display/intel_quirks.c b/drivers/gpu/drm/i915/
 +		.hook = quirk_disable_edp_panel_replay,
 +	},
  };
-
+ 
  void intel_init_quirks(struct intel_display *display)
