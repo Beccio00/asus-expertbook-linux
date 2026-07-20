@@ -95,6 +95,28 @@ pactl set-default-sink alsa_output.pci-0000_00_1f.3-platform-sof_sdw.HiFi__Speak
 `./patch.sh status audio-fix` also reports the cs35l56 firmware state and the
 active card profile.
 
+### "Dummy Output" / no ALSA card
+
+The userspace files in `audio-fix` can route and tune a card only after the
+kernel has registered it. If `wpctl status` shows only **Dummy Output**, check:
+
+```sh
+cat /proc/asound/cards
+journalctl -k -b | grep -Ei 'sof|soundwire|cs35|cs42|snd'
+```
+
+An empty card list together with `SDW3-Playback-SimpleJack`, `-EEXIST`, or
+`sof_sdw ... error -12` in the kernel log is the known phantom-RT722 failure.
+The duplicate SoundWire link aborts the `sof_sdw` probe before firmware, UCM,
+PipeWire, or WirePlumber can participate. Restarting WirePlumber and
+reinstalling this module cannot create the missing card.
+
+The kernel-side fix is
+[`upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch`](../upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch).
+It must be applied to the kernel you boot; merely having the patch file in this
+repository does not modify a distribution kernel. `./patch.sh status
+audio-fix` now detects this failure signature and points to that patch.
+
 ## Uninstall
 
 ```sh

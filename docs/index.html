@@ -596,7 +596,7 @@ sudo reboot</code></pre>
 
   #   Module                  Version  Installed State          Description
   ----------------------------------------------------------------------------------
-  1   audio-fix               2.1.0    2.1.0     up to date     Speakers + mics + clean panel
+  1   audio-fix               2.1.1    2.1.1     up to date     Speakers + mics + clean panel
   2   display-fix             1.1.2    1.1.2     up to date     xe Panel Replay / PSR lockup
   3   intel-perf-fix          1.1.0    1.1.0     up to date     thermald + intel-lpmd
   4   keyboard-backlight-fix  1.1.0    1.1.0     up to date     (optional) KDE backlight slider
@@ -643,7 +643,7 @@ Actions
           </tr>
           <tr>
             <td><a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/audio-fix"><code>audio-fix</code></a></td>
-            <td><span class="mono">2.1.0</span></td>
+            <td><span class="mono">2.1.1</span></td>
             <td>Cirrus CS35L56 firmware + HiFi UCM (upstream in alsa-ucm-conf 1.2.16) + SSP2-BT noise fix</td>
           </tr>
           <tr>
@@ -711,7 +711,15 @@ cs35l56 sdw:0:2:01fa:3556:01:1: FIRMWARE_MISSING                    ← without
 ─────────────────────────────────────────────────────────────────────────
 cs35l56 sdw:0:2:01fa:3556:01:0: Calibration applied                 ← with
 cs35l56 sdw:0:2:01fa:3556:01:0: Tuning PID: 0x23134, SID: 0x470200  ← with</code></pre>
-        <p><strong>Files installed (v2.1.0):</strong></p>
+        <p>
+          <strong>Only “Dummy Output”?</strong> That means the kernel did not
+          register an ALSA card, so these userspace files cannot help yet. Run
+          <code>./patch.sh status audio-fix</code>. The known
+          <code>SDW3-Playback-SimpleJack</code> / <code>sof_sdw ... error -12</code>
+          signature requires the kernel-side ghost-RT722
+          <a href="https://github.com/burakgon/asus-expertbook-linux/blob/main/upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch">0004 patch</a>.
+        </p>
+        <p><strong>Files installed (v2.1.1):</strong></p>
         <ul>
           <li><code>/lib/firmware/cirrus/cs35l56-b0-dsp1-misc-104315e4-l2u{0,1}.bin</code> — per-OEM tuning blobs (fallback for <code>linux-firmware-cirrus &lt; 20260519</code>)</li>
           <li><code>/lib/firmware/cirrus/cs35l56-b0-dsp1-misc-104315e4-l2u{0,1}.wmfw</code> — generic CS35L56 Rev 3.13.4 firmware patch (chip ROM upgrades 3.4.4 → 3.13.4)</li>
