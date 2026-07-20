@@ -41,7 +41,7 @@
 
 MODULE_NAME="audio-fix"
 MODULE_DESC="ASUS ExpertBook Ultra (B9406CAA) speaker/headphone audio via HiFi UCM + cs35l56 firmware"
-MODULE_VERSION="2.1.0"
+MODULE_VERSION="2.1.1"
 
 # Always-installed payload: OEM firmware (fallback for linux-firmware-cirrus
 # < 20260519) + the SSP2-BT topology-noise silencer. The HiFi UCM files are
@@ -133,7 +133,7 @@ module_post_uninstall() {
 }
 
 module_status_extra() {
-  local fw_state="" prof="" kmsg
+  local fw_state="" prof="" kmsg cards
   kmsg="$(journalctl -k -b 0 --no-pager 2>/dev/null || true)"
   if [[ $kmsg == *"Calibration applied"* ]]; then
     fw_state="${c_ok}cs35l56 firmware patched, calibration applied${c_off}"
@@ -144,12 +144,33 @@ module_status_extra() {
   fi
   printf '  cs35l56:  %s\n' "$fw_state"
 
+  # PipeWire's "Dummy Output" is not a UCM/profile problem: it means the
+  # kernel never registered an ALSA card. Previously status printed no card
+  # line at all in that case, which made a successful file install look like a
+  # successful audio fix. Detect it before asking users to restart WirePlumber.
+  cards="$(cat /proc/asound/cards 2>/dev/null || true)"
+  if [[ -z $cards || $cards == *"no soundcards"* ]]; then
+    printf '  card:     %sno ALSA sound card registered (PipeWire will show Dummy Output)%s\n' \
+      "$c_warn" "$c_off"
+    if grep -Eq 'SDW3-Playback-SimpleJack|sof_sdw.*(error -12|failed with error -12)' <<<"$kmsg"; then
+      printf '  kernel:   %sghost rt722 duplicate-link failure detected; audio-fix cannot repair this in userspace%s\n' \
+        "$c_warn" "$c_off"
+      printf '            apply upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch to the running kernel\n'
+    else
+      printf '  kernel:   %sinspect: journalctl -k -b | grep -Ei "sof|soundwire|cs35|cs42|snd"%s\n' \
+        "$c_dim" "$c_off"
+    fi
+    return
+  fi
+
   if command -v pactl >/dev/null 2>&1; then
     prof="$(pactl list cards 2>/dev/null | awk -F'Active Profile: ' '/Active Profile/ {print $2; exit}')"
     if [[ $prof == HiFi* ]]; then
       printf '  card:     %sActive Profile = HiFi (proper Speaker/Headphone routing)%s\n' "$c_ok" "$c_off"
     elif [[ -n $prof ]]; then
       printf '  card:     %sActive Profile = %s (expected HiFi -- restart WirePlumber)%s\n' "$c_warn" "$prof" "$c_off"
+    else
+      printf '  card:     %sALSA card exists, but PipeWire exposes no active card profile%s\n' "$c_warn" "$c_off"
     fi
   fi
 }

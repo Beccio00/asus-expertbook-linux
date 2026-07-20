@@ -103,7 +103,7 @@ typing single letters. Numbered table, color-coded state, cached.
 
   #   Module                  Version  Installed State          Description
   ----------------------------------------------------------------------------------
-  1   audio-fix               2.1.0    2.1.0     up to date     Speakers + mics + clean panel
+  1   audio-fix               2.1.1    2.1.1     up to date     Speakers + mics + clean panel
   2   display-fix             1.1.2    1.1.2     up to date     xe Panel Replay / PSR lockup
   3   intel-perf-fix          1.1.0    1.1.0     up to date     thermald + intel-lpmd
   4   keyboard-backlight-fix  1.1.0    1.1.0     up to date     (optional) KDE backlight slider
@@ -195,6 +195,12 @@ as of `alsa-ucm-conf 1.2.16`**, so on 1.2.16+ this module installs only the
 firmware + the SSP2-BT drop-in; the UCM rows below are dropped in **only as a
 fallback on `alsa-ucm-conf < 1.2.16`** (and the `NoExtract` pin is removed
 automatically once the package crosses 1.2.16).
+
+> **If PipeWire shows only “Dummy Output”:** the kernel did not register an
+> ALSA card, so firmware/UCM installation cannot help yet. Check
+> `./patch.sh status audio-fix`; the known `SDW3-Playback-SimpleJack` /
+> `sof_sdw ... error -12` failure requires kernel patch
+> [`0004`](upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch).
 
 | File | Path | What it does |
 |---|---|---|
