@@ -478,9 +478,9 @@ Result: install-all is appropriate for this hardware.</code></pre>
           <div class="ba-arrow">→</div>
           <div class="ba-cell ba-good">
             <strong>After — <code>audio-fix</code></strong>
-            A B9406CAA-only DKMS overlay survives kernel updates. The real HiFi
-            Speaker/Headphone/Mic profile loads and the CS35L56 tuning firmware
-            is active.
+            The accepted in-kernel B9406CAA quirk is used when present; older
+            kernels get a narrowly scoped DKMS compatibility overlay. The real
+            HiFi profile and CS35L56 tuning firmware are active.
           </div>
         </div>
       </div>
@@ -497,8 +497,9 @@ Result: install-all is appropriate for this hardware.</code></pre>
           <div class="ba-arrow">→</div>
           <div class="ba-cell ba-good">
             <strong>After — <code>wifi-fix</code></strong>
-            EHT disabled (<code>disable_11be=Y</code>) → rock-solid Wi-Fi 6 / HE
-            (6 GHz, 160 MHz, ~2.1 Gbit/s). Zero beacon spam, no freezes.
+            EHT disabled (<code>disable_11be=Y</code>) → fast Wi-Fi 6 / HE
+            (160 MHz, ~2.1 Gbit/s). Status separately reports Linux 7.2 C106's
+            misleading beacon-warning flood instead of hiding it.
           </div>
         </div>
       </div>
@@ -515,9 +516,9 @@ Result: install-all is appropriate for this hardware.</code></pre>
           <div class="ba-arrow">→</div>
           <div class="ba-cell ba-good">
             <strong>After — <code>display-fix</code></strong>
-            Internal panel stable indefinitely. PSR / Panel Replay disabled
-            cleanly at boot; <code>xe.enable_dpcd_backlight=2</code> makes panel
-            brightness follow the sysfs/KDE setting.
+            Linux 7.2's repaired PSR / Panel Replay defaults are retained;
+            <code>xe.enable_dpcd_backlight=2</code> makes panel brightness follow
+            the sysfs/KDE setting.
           </div>
         </div>
       </div>
@@ -624,14 +625,14 @@ sudo reboot</code></pre>
 
   #   Module                    Version  Installed State          Description
   ------------------------------------------------------------------------------------
-  1   audio-fix                3.0.0    3.0.0     up to date     Ghost-RT722 DKMS + HiFi audio
+  1   audio-fix                3.1.0    3.1.0     up to date     Adaptive ghost-RT722 fix + HiFi audio
   2   camera-firmware          3009     3009      up to date     Verified camera UEFI capsule
-  3   display-fix              1.2.0    1.2.0     up to date     Stable panel + DPCD brightness
+  3   display-fix              1.3.0    1.3.0     up to date     Linux 7.2 defaults + DPCD brightness
   4   intel-perf-fix           1.1.0    1.1.0     up to date     thermald + intel-lpmd
   5   keyboard-backlight-fix   1.1.0    1.1.0     up to date     (optional) KDE backlight slider
   6   touchpad-fix             1.1.1    1.1.1     up to date     PixArt 093A:4F05 pressure quirk
   7   webcam-ai-fix            1.1.0    1.1.0     up to date     OBS CPU background blur
-  8   wifi-fix                 2.0.0    2.0.0     up to date     BE211: disable broken EHT
+  8   wifi-fix                 2.1.0    2.1.0     up to date     BE211: EHT fallback + C106 diagnostics
 
 Actions
   i &lt;num&gt;    install / update module
@@ -672,8 +673,8 @@ Actions
           </tr>
           <tr>
             <td><a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/audio-fix"><code>audio-fix</code></a></td>
-            <td><span class="mono">3.0.0</span></td>
-            <td>B9406CAA-only ghost-RT722 DKMS filter + HiFi UCM + CS35L56 tuning; persists across kernel updates</td>
+            <td><span class="mono">3.1.0</span></td>
+            <td>Adaptive B9406CAA ghost-RT722 compatibility + HiFi UCM + CS35L56 tuning; skips DKMS when the upstream quirk is present</td>
           </tr>
           <tr>
             <td><a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/camera-firmware"><code>camera-firmware</code></a></td>
@@ -682,13 +683,13 @@ Actions
           </tr>
           <tr>
             <td><a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/wifi-fix"><code>wifi-fix</code></a></td>
-            <td><span class="mono">2.0.0</span></td>
-            <td>BE211: disable broken 802.11be/EHT — deliberate Wi-Fi 7 → stable Wi-Fi 6 (HE) downgrade</td>
+            <td><span class="mono">2.1.0</span></td>
+            <td>BE211: disable broken 802.11be/EHT and diagnose Linux 7.2 C106 beacon warnings without broad power/performance overrides</td>
           </tr>
           <tr>
             <td><a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/display-fix"><code>display-fix</code></a></td>
-            <td><span class="mono">1.2.0</span></td>
-            <td>xe Panel Replay / PSR lockup plus non-functional brightness — Limine cmdline + forced VESA DPCD backlight</td>
+            <td><span class="mono">1.3.0</span></td>
+            <td>Linux 7.2 PSR/Panel Replay defaults plus forced VESA DPCD backlight for working brightness</td>
           </tr>
           <tr>
             <td><a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/intel-perf-fix"><code>intel-perf-fix</code></a></td>
@@ -733,11 +734,11 @@ Actions
       </details>
 
       <details>
-        <summary><code>audio-fix</code> — persistent DKMS fix plus HiFi audio</summary>
+        <summary><code>audio-fix</code> — adaptive upstream/DKMS ghost fix plus HiFi audio</summary>
         <ol>
           <li>B9406CAA firmware advertises an unfitted RT722. When the SoundWire core marks it <code>UNATTACHED</code>, the generic SOF machine driver can still create a duplicate SimpleJack link, fail with <code>-12</code>, and register no ALSA card.</li>
           <li>Cirrus CS35L56 amps boot in <code>FIRMWARE_MISSING</code> when <code>linux-firmware-cirrus &lt; 20260519</code> lacks the per-OEM blobs for PCI subsystem <code>1043:15e4</code>.</li>
-          <li>The combined sidecar codec <code>cs35l56+cs42l43-spk</code> has no UCM in <code>alsa-ucm-conf &lt; 1.2.16</code>, and its old <code>SpeakerCodec</code> regex drops the <code>-spk</code> suffix. Version 1.2.16 fixes this upstream.</li>
+          <li>The combined speaker-codec string <code>cs35l56+cs42l43-spk</code> has no UCM in <code>alsa-ucm-conf &lt; 1.2.16</code>, and its old <code>SpeakerCodec</code> regex drops the <code>-spk</code> suffix. Version 1.2.16 fixes this upstream.</li>
           <li>The generic topology also exposes an unused SSP2-BT offload PCM whose failed probes flood the kernel log.</li>
         </ol>
         <pre class="term"><code>$ sudo dmesg | grep cs35l56
@@ -748,17 +749,20 @@ cs35l56 sdw:0:2:01fa:3556:01:0: Calibration applied                 ← with
 cs35l56 sdw:0:2:01fa:3556:01:0: Tuning PID: 0x23134, SID: 0x470200  ← with</code></pre>
         <p>
           <strong>Only “Dummy Output”?</strong> That means the kernel did not
-          register an ALSA card. Version 3 installs a narrowly scoped
-          <code>snd-soc-sof-sdw</code> DKMS overlay that removes only the
-          B9406CAA's <code>UNATTACHED</code> RT722 before DAI-link creation. Run
+          register an ALSA card. Version 3.1 installs a narrowly scoped
+          <code>snd-soc-sof-sdw</code> DKMS overlay only on kernels lacking the
+          accepted upstream quirk; it removes only the B9406CAA's
+          <code>UNATTACHED</code> RT722 before DAI-link creation. Run
           <code>./patch.sh status audio-fix</code>; the known
           <code>SDW3-Playback-SimpleJack</code> / <code>sof_sdw ... error -12</code>
           signature should disappear after one reboot. DKMS rebuilds the
-          overlay automatically whenever Arch/CachyOS installs a new kernel.
+          overlay automatically whenever Arch/CachyOS installs a kernel that
+          still needs it, and removes it once upstream commit
+          <code>90af3209742d</code> is present in every installed kernel.
         </p>
-        <p><strong>Files installed (v3.0.0):</strong></p>
+        <p><strong>Files installed (v3.1.0):</strong></p>
         <ul>
-          <li><code>/usr/src/asus-expertbook-sof-sdw-3.0.0/</code> and <code>/lib/modules/*/updates/dkms/</code> — board-scoped ghost-RT722 filter with <code>AUTOINSTALL=yes</code>; no manual kernel rebuild</li>
+          <li><code>/usr/src/asus-expertbook-sof-sdw-3.0.0/</code> and <code>/lib/modules/*/updates/dkms/</code> — board-scoped compatibility filter, built only for kernels lacking upstream commit <code>90af3209742d</code></li>
           <li><code>/lib/firmware/cirrus/cs35l56-b0-dsp1-misc-104315e4-l2u{0,1}.bin</code> — per-OEM tuning blobs (fallback for <code>linux-firmware-cirrus &lt; 20260519</code>)</li>
           <li><code>/lib/firmware/cirrus/cs35l56-b0-dsp1-misc-104315e4-l2u{0,1}.wmfw</code> — generic CS35L56 Rev 3.13.4 firmware patch (chip ROM upgrades 3.4.4 → 3.13.4)</li>
           <li><code>/etc/wireplumber/wireplumber.conf.d/52-disable-bt-sco-offload.conf</code> — silences the dead SSP2-BT offload PCM that spams the kernel log</li>
@@ -767,44 +771,38 @@ cs35l56 sdw:0:2:01fa:3556:01:0: Tuning PID: 0x23134, SID: 0x470200  ← with</co
       </details>
 
       <details>
-        <summary><code>wifi-fix</code> — 802.11be/EHT is broken on the BE211, so disable it</summary>
+        <summary><code>wifi-fix</code> — disable broken EHT and diagnose C106 beacon warnings</summary>
         <p>
           The core problem is <strong>802.11be (EHT / Wi-Fi 7) itself</strong> on
           the Intel BE211 (<code>8086:e440</code>) under
-          <code>iwlwifi</code>/<code>iwlmld</code>: the EHT RX path collapses to
+          <code>iwlwifi</code>/<code>iwlmld</code>: the EHT RX path can collapse to
           <strong>MCS0 / NSS1</strong> and MLO sessions tear down, so the "Wi-Fi 7"
-          link is slower and flakier than plain Wi-Fi 6. Not fixed upstream as of
-          Linux 7.1-rc7. Two secondary irritants pile on: <code>iwlmld</code>
-          defaults to <code>power_scheme=2</code> (beacon-loss recovery churn),
-          and the <code>iwlwifi</code> TX-segmentation offload bug can throw
-          <code>Microcode SW error</code> freezes under heavy traffic.
+          link is slower and flakier than plain Wi-Fi 6 on this machine.
         </p>
-        <pre class="term"><code>$ sudo dmesg | grep -E "missed beacons|Microcode SW error" | wc -l
-2046      ← with EHT on
-0         ← with disable_11be=Y (Wi-Fi 6 fallback)</code></pre>
+        <pre class="term"><code>$ journalctl -k -b | grep -c "missed beacons exceeds"
+7228      # possible with Linux 7.2 C106 even while data continues flowing</code></pre>
         <p>
           <strong>Core fix</strong> — drop the broken 802.11be layer so the radio
-          runs as rock-solid Wi-Fi 6 (HE). Same approach Omarchy ships; verified
-          at ~2.1 Gbit/s over 160 MHz 6 GHz HE here.
+          runs as Wi-Fi 6 (HE). Same approach Omarchy ships; verified at about
+          2.1 Gbit/s over 160 MHz HE here.
         </p>
         <p><strong>Files installed:</strong></p>
         <ul>
-          <li><code>/etc/modprobe.d/iwlwifi-disable-eht.conf</code> — <code>options iwlwifi disable_11be=Y</code>; disables EHT / Wi-Fi 7, link falls back to stable Wi-Fi 6 / HE</li>
-          <li><code>/etc/modprobe.d/iwlmld-active.conf</code> — <code>options iwlmld power_scheme=1</code> (secondary; trims HE-mode instability)</li>
-          <li><code>/etc/tmpfiles.d/pcie-aspm-performance.conf</code> — global ASPM = performance at boot (secondary)</li>
-          <li><code>/etc/NetworkManager/dispatcher.d/90-iwlwifi-no-offload</code> — <code>ethtool -K $iface tso off gso off gro off</code> on every iwlwifi up (secondary)</li>
+          <li><code>/etc/modprobe.d/iwlwifi-disable-eht.conf</code> — <code>options iwlwifi disable_11be=Y</code>; disables EHT / Wi-Fi 7 and falls back to Wi-Fi 6 / HE</li>
         </ul>
         <p>
-          This is a deliberate <strong>Wi-Fi 7 → Wi-Fi 6</strong> downgrade — EHT
-          is the problem on this silicon, and the secondary tunables do
-          <strong>not</strong> keep Wi-Fi 7 alive. Bluetooth coex
-          (<code>bt_coex_active=Y</code>) is left untouched, so Bluetooth keeps
-          working.
+          Linux 7.2 raises Panther Lake firmware support from C102 to C106. C106
+          may flood <code>missed beacons ... but receiving data</code> while the
+          driver deliberately remains connected. Status reports that firmware
+          and warning count; it does not hide logs or force a firmware downgrade.
+          Version 2.1 removes the former power-scheme, global ASPM-performance
+          and offload overrides because they did not stop this warning and were
+          broader than the EHT problem. Bluetooth coexistence remains enabled.
         </p>
       </details>
 
       <details>
-        <summary><code>display-fix</code> — xe driver Panel Replay handshake hangs</summary>
+        <summary><code>display-fix</code> — Linux 7.2 display defaults plus DPCD brightness</summary>
         <p>
           The Samsung Display Corp panel reports IEEE OUI <code>00:aa:01</code>
           in DPCD register 0x300 and supports Panel Replay Selective Update
@@ -815,39 +813,35 @@ cs35l56 sdw:0:2:01fa:3556:01:0: Tuning PID: 0x23134, SID: 0x470200  ← with</co
 xe 0000:00:02.0: [drm] *ERROR* [CRTC:151:pipe A] DSB 0 timed out waiting for idle
 kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></pre>
         <p>
-          Once wedged, only a reboot recovers — modeset cycle, GPU reset, and
-          runtime PSR-disable via debugfs all fail to unstick the display
-          state buffer. Worse than a black panel: when the PSR2
+          On older kernels, once wedged, only a reboot recovered — modeset
+          cycle, GPU reset, and runtime PSR-disable via debugfs all failed to
+          unstick the display state buffer. Worse than a black panel: when the PSR2
           <strong>selective-fetch</strong> path deadlocks the DSB during heavy
           compositing (a screen capture is enough), it can take the whole
           <strong>kernel</strong> down — a silent hard hang with no oops, no MCE,
-          empty <code>pstore</code>/BERT. Same pattern Intel addresses for Dell
-          XPS 14/16 in mainline (per-device disable in
-          <code>intel_quirks.c</code>) — our
-          <a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/upstream-patches"><code>upstream-patches/0001</code></a>
-          ports the same disable to our subsystem ID.
+          empty <code>pstore</code>/BERT.
         </p>
         <p>
-          There is <strong>no dedicated upstream tracker</strong> for this
-          Panther Lake PSR2 selective-fetch / DSB hang; it's reproduced locally
-          on <code>linux-cachyos 7.0.11</code> and <code>linux-cachyos-rc 7.1-rc7</code>.
-          (drm/xe #7513 — <em>"Lunar lake, rare shutdown under load"</em> — is a
-          <strong>distinct</strong> Lunar Lake PMC-firmware bug that leaves a
-          <code>BERT: [Hardware Error]</code> record and is <strong>not</strong>
-          cured by disabling PSR, so it is not this one.)
+          Linux 7.2 contains generic Panther Lake Panel Replay/PSR/DC-state,
+          selective-fetch, DSB and Xe recovery fixes. Version 1.3 re-enables
+          those kernel defaults instead of carrying the older global
+          <code>=0</code> safety switches. Issue
+          <a href="https://github.com/burakgon/asus-expertbook-linux/issues/7">#7</a>
+          records the older reproducer and the Linux 7.2 retest.
         </p>
         <p><strong>Files installed:</strong></p>
         <ul>
-          <li><code>/etc/modprobe.d/xe-disable-psr.conf</code> — disables PSR / Panel Replay and forces <code>enable_dpcd_backlight=2</code> for any late module load</li>
-          <li><code>/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf</code> — appends <code>xe.enable_psr=0 xe.enable_psr2_sel_fetch=0 xe.enable_panel_replay=0 xe.enable_dpcd_backlight=2</code>; the post-install hook calls <code>limine-update</code></li>
+          <li><code>/etc/modprobe.d/xe-dpcd-backlight.conf</code> — forces only <code>enable_dpcd_backlight=2</code> for any late module load</li>
+          <li><code>/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf</code> — appends only <code>xe.enable_dpcd_backlight=2</code>; the post-install hook calls <code>limine-update</code></li>
         </ul>
         <p>
-          <code>enable_psr=0</code> is an extra conservative stability guard,
-          not a brightness requirement. Linux 7.1 gained relevant PSR fixes;
-          <a href="https://github.com/burakgon/asus-expertbook-linux/issues/7">issue #7</a>
-          tracks the long-soak, suspend and screen-capture testing required
-          before the repo safely re-enables PSR by default. Upstream patch
-          <code>0001</code> replaces only the global Panel Replay flag.
+          Install removes the old PSR/Panel Replay modprobe file and archives
+          the legacy Omarchy Limine drop-in so neither can silently re-add
+          <code>xe.enable_psr=0</code>, <code>xe.enable_psr2_sel_fetch=0</code> or
+          <code>xe.enable_panel_replay=0</code>. The DPCD brightness override is
+          independent and remains verified on this panel. Patch <code>0001</code>
+          is retained only as a fallback if a 7.2+ long soak reproduces the
+          freeze; it is not currently submission-ready.
         </p>
       </details>
 
@@ -1046,11 +1040,9 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
     <div class="wrap">
       <h2>Upstream submissions</h2>
       <p class="sub">
-        The repo ships four submission-ready patches that turn the local
-        workarounds into permanent upstream entries, structurally identical to existing
-        Dell / Lenovo / ASUS Zenbook quirks already accepted by the relevant
-        trees. When they land upstream, the corresponding modules become
-        deletable.
+        The repo now separates accepted, pending, experimental and retired
+        upstream work. The B9406CAA SoundWire fix is accepted in Linus' tree;
+        the former sidecar-amplifier proposal was invalid and has been removed.
       </p>
 
       <table>
@@ -1060,13 +1052,13 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
         <tbody>
           <tr>
             <td><span class="mono">0001</span></td>
-            <td><code>drivers/gpu/drm/i915/display/intel_quirks.c</code></td>
-            <td><code>display-fix</code>'s global Panel Replay cmdline flag</td>
+            <td>Linux display</td>
+            <td>Experimental fallback; held while Linux 7.2 runs with repaired PSR/Panel Replay defaults</td>
           </tr>
           <tr>
-            <td><span class="mono">0002</span></td>
-            <td><code>sound/soc/intel/boards/sof_sdw.c</code></td>
-            <td>most of <code>audio-fix</code> (combined-codec UCM routing)</td>
+            <td>former <span class="mono">0002</span></td>
+            <td>Linux sound</td>
+            <td>Removed: B9406CAA is not a sidecar-amplifier design</td>
           </tr>
           <tr>
             <td><span class="mono">0003</span></td>
@@ -1076,15 +1068,13 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
           <tr>
             <td><span class="mono">0004</span></td>
             <td><code>drivers/soundwire/dmi-quirks.c</code></td>
-            <td><code>audio-fix</code>'s ghost-RT722 DKMS workaround</td>
+            <td>Accepted upstream as <code>90af3209742d</code>; exact patch retained for backports</td>
           </tr>
         </tbody>
       </table>
 
       <p style="margin-top: 24px">
-        See the live tracking notes for applicability against
-        <code>torvalds/linux</code>, <code>drm-intel-next</code>, and libinput
-        main, plus test and submission details in
+          See the live tracking notes, backport status and retired-patch rationale in
         <a href="https://github.com/burakgon/asus-expertbook-linux/tree/main/upstream-patches">
           <code>upstream-patches/README.md</code></a>.
       </p>
@@ -1167,10 +1157,11 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
           landed: <code>alsa-ucm-conf 1.2.16</code> ships the
           <code>cs42l43-spk+cs35l56</code> codec dir and
           <code>linux-firmware-cirrus &gt;= 20260519</code> ships the OEM blobs,
-          while <code>audio-fix</code> keeps the still-missing B9406CAA
-          ghost-RT722 kernel quirk as an automatically rebuilt DKMS overlay.
-          As the remaining kernel/quirk patches land and your distro picks them
-          up, the local workarounds become deletable.
+          and the B9406CAA ghost-RT722 kernel quirk is accepted as
+          <code>90af3209742d</code>. It landed after Linux 7.2, so
+          <code>audio-fix</code> detects the marker in each installed kernel and
+          keeps its DKMS compatibility overlay only where a release or distro
+          backport still lacks it.
         </p>
       </details>
 

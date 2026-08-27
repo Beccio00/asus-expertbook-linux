@@ -93,7 +93,33 @@ elif lsmod | grep -q '^iwlmvm'; then
 fi
 echo
 
-# 6) Fingerprint reader
+# 6) Integrated Bluetooth
+printf '%sBluetooth%s\n' "$c_bold" "$c_off"
+if lspci -nn 2>/dev/null | grep -qi '\[8086:e476\]'; then
+  ok "Intel Panther Lake CNVi Bluetooth (8086:e476) detected"
+  if grep -RqsE '^[[:space:]]*(blacklist[[:space:]]+btintel_pcie|install[[:space:]]+btintel_pcie[[:space:]]+/bin/(true|false))' \
+      /etc/modprobe.d 2>/dev/null; then
+    fail "btintel_pcie is blacklisted in /etc/modprobe.d — remove the override to use the integrated controller"
+  elif lspci -nnk -d 8086:e476 2>/dev/null | grep -q 'Kernel driver in use: btintel_pcie'; then
+    ok "btintel_pcie driver active"
+  elif grep -q '^btintel_pcie ' /proc/modules 2>/dev/null; then
+    ok "btintel_pcie module loaded; controller may still be probing"
+  else
+    warn "btintel_pcie is not loaded"
+  fi
+
+  if command -v bluetoothctl >/dev/null 2>&1 && \
+     timeout 3 bluetoothctl list 2>/dev/null | grep -q '^Controller '; then
+    ok "BlueZ exposes an integrated controller"
+  else
+    warn "BlueZ does not currently expose a controller"
+  fi
+else
+  note "Intel 8086:e476 controller not detected"
+fi
+echo
+
+# 7) Fingerprint reader
 printf '%sFingerprint%s\n' "$c_bold" "$c_off"
 fingerprint=""
 if command -v lsusb >/dev/null 2>&1; then
@@ -116,7 +142,7 @@ else
 fi
 echo
 
-# 7) Camera UEFI firmware
+# 8) Camera UEFI firmware
 printf '%sCamera firmware%s\n' "$c_bold" "$c_off"
 camera_raw=""
 if command -v fwupdmgr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -133,7 +159,7 @@ else
 fi
 echo
 
-# 8) Distro
+# 9) Distro
 printf '%sDistro%s\n' "$c_bold" "$c_off"
 if [[ -f /etc/arch-release ]]; then
   ok "Arch (or derivative) — patcher's pacman + paths assumed correct"

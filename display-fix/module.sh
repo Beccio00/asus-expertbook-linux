@@ -1,45 +1,51 @@
 # shellcheck shell=bash
 # display-fix module manifest.
 #
-# ASUS ExpertBook Ultra (B9406CAA) Panther Lake iGPU + xe driver hangs the
-# eDP-1 display engine when the panel uses Panel Replay Selective Update.
-# Symptoms in dmesg:
-#   xe 0000:00:02.0: [drm] *ERROR* Timed out waiting PSR idle state
-#   xe 0000:00:02.0: [drm] *ERROR* [CRTC:151:pipe A] DSB 0 timed out waiting for idle
-#   kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver
-# and the internal panel goes black until reboot.
-#
-# Fix: disable PSR / Panel Replay and force the panel's VESA DPCD backlight
-# interface (`xe.enable_dpcd_backlight=2`) via kernel cmdline. The latter fixes
-# the B9406CAA case where sysfs brightness changes but panel luminance does not.
-# modprobe.d
-# alone is NOT enough on this distro — xe loads from initramfs before
+# Linux 7.2 includes the Panther Lake Panel Replay/PSR, selective-fetch, DSB,
+# DC-state and Xe recovery fixes needed to retest the panel with self-refresh
+# enabled. Do not globally force PSR, PSR2 selective fetch or Panel Replay off.
+# Keep only the panel's independently verified VESA DPCD backlight override
+# (`xe.enable_dpcd_backlight=2`), which fixes the B9406CAA case where sysfs
+# brightness changes but panel luminance does not. modprobe.d alone is NOT
+# enough on this distro — xe loads from initramfs before
 # /etc/modprobe.d is honoured, so the params have to land on the kernel
 # cmdline. We install a managed `limine-entry-tool` drop-in and regenerate the
 # Limine entries. This is the CachyOS source of truth; `/etc/default/limine`
 # is not used by current limine-mkinitcpio-hook releases.
 #
 # We still drop the modprobe.d file as belt-and-suspenders for any future
-# scenario where xe is rmmod'd and re-loaded post-boot.
-#
-# Upstream status: there is NO dedicated upstream tracker for this PTL
-# PSR2 selective-fetch / DSB display hang. It is reproduced locally on
-# linux-cachyos 7.0.11 and linux-cachyos-rc 7.1-rc7. (drm/xe #7513 is a
-# related but DISTINCT Lunar Lake PMC-firmware shutdown bug — "rare
-# shutdown under load", label platform: LNL, leaves a BERT Hardware Error
-# and is NOT cured by disabling PSR — so it is NOT this bug.) The cmdline
-# workaround below remains the conservative default. Linux 7.1 added relevant
-# PSR fixes; issue #7 tracks long-soak testing of PSR enabled while Panel Replay
-# and selective fetch remain disabled.
+# scenario where xe is rmmod'd and re-loaded post-boot. Install also retires
+# the two older local files that added the global `=0` safety switches.
 
 MODULE_NAME="display-fix"
-MODULE_DESC="B9406CAA xe: stable panel plus working DPCD brightness control"
-MODULE_VERSION="1.2.0"
+MODULE_DESC="B9406CAA xe: working DPCD brightness; PSR/Panel Replay use Linux 7.2 defaults"
+MODULE_VERSION="1.3.0"
 
 MODULE_FILES=(
-  "xe-disable-psr.conf:/etc/modprobe.d/xe-disable-psr.conf"
+  "xe-dpcd-backlight.conf:/etc/modprobe.d/xe-dpcd-backlight.conf"
   "limine-display.conf:/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf"
 )
+
+_df_remove_obsolete_files() {
+  local old_modprobe="/etc/modprobe.d/xe-disable-psr.conf"
+  local old_limine="/etc/limine-entry-tool.d/asus-expertbook-b9406-display.conf"
+  local archived="${old_limine}.disabled-by-asus-expertbook-linux"
+
+  if [[ -f $old_modprobe ]]; then
+    rm -- "$old_modprobe"
+    log "[display-fix] removed obsolete PSR-disable file $old_modprobe"
+  fi
+
+  if [[ -f $old_limine ]]; then
+    if [[ ! -e $archived ]]; then
+      mv -- "$old_limine" "$archived"
+      log "[display-fix] archived obsolete Limine drop-in as $archived"
+    else
+      rm -- "$old_limine"
+      log "[display-fix] removed duplicate obsolete Limine drop-in $old_limine"
+    fi
+  fi
+}
 
 _df_remove_legacy_block() {
   local legacy="/etc/default/limine"
@@ -67,29 +73,30 @@ _df_regen_limine() {
 
 module_post_install() {
   _df_remove_legacy_block
+  _df_remove_obsolete_files
   _df_regen_limine
   echo
-  echo "Reboot to apply: xe will load with PSR disabled and VESA DPCD backlight forced."
+  echo "Reboot to apply: xe will use Linux 7.2 PSR/Panel Replay defaults with VESA DPCD backlight forced."
 }
 
 module_post_uninstall() {
   _df_remove_legacy_block
+  _df_remove_obsolete_files
   _df_regen_limine
   echo
-  echo "Reboot to revert: PSR will be re-enabled and the lockup may recur."
+  echo "Reboot to stop forcing the VESA DPCD backlight interface."
 }
 
 module_status_extra() {
   local backlight_value="" token
 
-  if grep -q 'xe\.enable_psr=0' /proc/cmdline 2>/dev/null; then
-    printf '  cmdline: %sxe.enable_psr=0 active in current boot%s\n' "$c_ok" "$c_off"
+  if grep -Eq '(^| )(xe\.enable_psr=0|xe\.enable_psr2_sel_fetch=0|xe\.enable_panel_replay=0)( |$)' \
+      /proc/cmdline 2>/dev/null; then
+    printf '  self-refresh:%s legacy =0 override active in this boot — reboot to use kernel defaults%s\n' \
+      "$c_warn" "$c_off"
   else
-    if [[ -f /etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf ]]; then
-      printf '  cmdline: %sLimine drop-in installed — reboot to apply%s\n' "$c_warn" "$c_off"
-    else
-      printf '  cmdline: %sxe.enable_psr not on kernel cmdline%s\n' "$c_warn" "$c_off"
-    fi
+    printf '  self-refresh:%s no global PSR/Panel Replay disable; Linux defaults active%s\n' \
+      "$c_ok" "$c_off"
   fi
 
   while IFS= read -r token; do
@@ -115,8 +122,8 @@ module_status_extra() {
     mode="$(awk -F': ' '/^PSR mode:/ {print $2; exit}' /sys/kernel/debug/dri/0/i915_edp_psr_status 2>/dev/null)"
     if [[ -n "$mode" ]]; then
       case "$mode" in
-        disabled*) printf '  panel:   %sPSR mode: %s%s\n' "$c_ok" "$mode" "$c_off" ;;
-        *)         printf '  panel:   %sPSR mode: %s%s\n' "$c_warn" "$mode" "$c_off" ;;
+        disabled*) printf '  panel:   %sPSR mode: %s%s\n' "$c_warn" "$mode" "$c_off" ;;
+        *)         printf '  panel:   %sPSR mode: %s%s\n' "$c_ok" "$mode" "$c_off" ;;
       esac
     fi
   fi

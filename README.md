@@ -50,9 +50,9 @@ different distro, the modules themselves still apply — only the
 | Hardware | Symptom out of the box | After installing | Module |
 |---|---|---|---|
 | **PixArt I²C-HID** haptic touchpad `093A:4F05` (ACPI `ASCP1D80`) | **Touchpad doesn't move the cursor.** Kernel log spams `kernel bug: Touch jump detected and discarded.` libinput rejects every event. | Cursor responds to light touches like any normal laptop. Zero "Touch jump" lines. | [`touchpad-fix`](touchpad-fix/) |
-| **Cirrus CS42L43** codec + 2× **CS35L56** speaker amps (PCI subsystem `1043:15e4`) | **Dummy Output / silent speakers.** A ghost RT722 can abort ALSA card registration; older userspace also lacks tuning/UCM. | B9406CAA-only DKMS filter survives kernel updates; HiFi speaker/headphone/mic routing and calibrated amps work. | [`audio-fix`](audio-fix/) |
-| **Intel Wi-Fi 7 BE211** Panther Lake CNVi (`8086:e440`) | **Wi-Fi 7 (802.11be / EHT) is unstable.** EHT RX collapses to MCS0/NSS1, MLO sessions tear down, `missed beacons` spam, occasional `Microcode SW error` freezes. | EHT disabled (`disable_11be=Y`) → rock-solid **Wi-Fi 6 / HE** fallback (6 GHz, 160 MHz, ~2.1 Gbit/s verified). Zero beacon spam, no freezes. | [`wifi-fix`](wifi-fix/) |
-| **Samsung Display Corp** eDP panel + Intel **`xe`** driver (Xe3 Panther Lake iGPU) | **Internal panel goes black or brightness changes do nothing.** `kwin_wayland: Pageflip timed out!`; the eDP engine can wedge until reboot. | PSR / Panel Replay disabled; forced VESA DPCD backlight makes KDE/sysfs brightness change panel luminance. | [`display-fix`](display-fix/) |
+| **Cirrus CS42L43** codec + 2× **CS35L56** speaker amps (PCI subsystem `1043:15e4`) | **Dummy Output / silent speakers.** A ghost RT722 can abort ALSA card registration; older userspace also lacks tuning/UCM. | Uses the accepted in-kernel B9406 quirk when present and DKMS only on older kernels; HiFi routing and calibrated amps work. | [`audio-fix`](audio-fix/) |
+| **Intel Wi-Fi 7 BE211** Panther Lake CNVi (`8086:e440`) | **Wi-Fi 7 (802.11be / EHT) is unstable.** EHT RX can collapse to MCS0/NSS1 and MLO sessions tear down. Linux 7.2's C106 firmware may separately flood `missed beacons` warnings even while data flows. | EHT disabled (`disable_11be=Y`) → fast **Wi-Fi 6 / HE** fallback; status reports firmware and warning count without hiding logs or forcing a firmware downgrade. | [`wifi-fix`](wifi-fix/) |
+| **Samsung Display Corp** eDP panel + Intel **`xe`** driver (Xe3 Panther Lake iGPU) | Older kernels could wedge PSR/Panel Replay; brightness could also change in sysfs without changing panel luminance. | Linux 7.2 self-refresh defaults retained; forced VESA DPCD backlight makes KDE/sysfs brightness work. | [`display-fix`](display-fix/) |
 | **Intel Core Ultra X7/X9** Panther Lake hybrid (P + E + LP-E cores) | **Idle power 4–5 W**, fans audible at idle, P-cores never deep-sleep. | Idle ≈ 2–2.5 W. Workload parks on a single LP-E core. P-cores reach `C10`. | [`intel-perf-fix`](intel-perf-fix/) |
 | **USB UVC webcam** (+ idle Panther Lake NPU) | **No AI camera effects.** Windows Studio Effects (background blur, smart framing) doesn't exist on Linux out of the box. | **CPU** background blur via OBS + `obs-backgroundremoval`, exposed as a virtual camera ("AI Camera"). *(NPU offload is not available in the OBS plugin on Linux — see the module's reality-check note.)* | [`webcam-ai-fix`](webcam-ai-fix/) |
 | **Shinetech USB camera + UEFI ESRT target** | ASUS camera firmware 3009 is distributed as a Windows EXE. | Compares locally against the fixed, verified 3009 baseline; offers a confirmed `fwupd` capsule update without running Windows or querying ASUS for newer versions. | [`camera-firmware`](camera-firmware/) |
@@ -105,14 +105,14 @@ typing single letters. Numbered table, color-coded state, cached.
 
   #   Module                    Version  Installed State          Description
   ------------------------------------------------------------------------------------
-  1   audio-fix                 3.0.0    3.0.0     up to date     Ghost-RT722 DKMS + HiFi audio
+  1   audio-fix                 3.1.0    3.1.0     up to date     Adaptive ghost-RT722 fix + HiFi audio
   2   camera-firmware           3009     3009      up to date     Verified camera UEFI capsule
-  3   display-fix               1.2.0    1.2.0     up to date     Stable panel + DPCD brightness
+  3   display-fix               1.3.0    1.3.0     up to date     Linux 7.2 display defaults + DPCD brightness
   4   intel-perf-fix            1.1.0    1.1.0     up to date     thermald + intel-lpmd
   5   keyboard-backlight-fix    1.1.0    1.1.0     up to date     (optional) KDE backlight slider
   6   touchpad-fix              1.1.1    1.1.1     up to date     PixArt 093A:4F05 pressure quirk
   7   webcam-ai-fix             1.1.0    1.1.0     up to date     OBS CPU background blur
-  8   wifi-fix                  2.0.0    2.0.0     up to date     BE211: disable broken EHT
+  8   wifi-fix                  2.1.0    2.1.0     up to date     BE211: EHT fallback + C106 diagnostics
 
 Actions
   i <num>    install / update module (idempotent — re-runs post hooks)
@@ -171,7 +171,7 @@ is loaded.
 2. The Cirrus CS35L56 speaker amps need per-OEM tuning firmware. As of
    `linux-firmware-cirrus >= 20260519` it ships upstream for `1043:15e4`; on
    anything older the amps boot `FIRMWARE_MISSING` and the bundled blobs fill in.
-3. The card reports a **combined** sidecar-amp codec — `spk:cs35l56+cs42l43-spk`
+3. The card reports a **combined speaker-codec** string — `spk:cs35l56+cs42l43-spk`
    (or two `spk:` tags on older kernels). Stock `alsa-ucm-conf 1.2.15.x` has no
    UCM dir for it **and** its `SpeakerCodec` regex drops the trailing `-spk`, so
    `alsaucm` fails (`codecs/cs35l56+cs42l43/init.conf: -2`). WirePlumber then
@@ -193,7 +193,7 @@ cs35l56 sdw:0:2:01fa:3556:01:0: Tuning PID: 0x23134, SID: 0x470200  ← with
 
 </details>
 
-<details><summary><b>The fix</b> — persistent DKMS filter + HiFi UCM + cs35l56 firmware</summary>
+<details><summary><b>The fix</b> — adaptive upstream/DKMS ghost filter + HiFi UCM + cs35l56 firmware</summary>
 
 The proper fix is the upstream **HiFi UCM**, not a profile hack — named ports,
 headphone-jack **auto-switching**, working volume + mic-mute LED. **It's upstream
@@ -202,12 +202,14 @@ firmware + the SSP2-BT drop-in; the UCM rows below are dropped in **only as a
 fallback on `alsa-ucm-conf < 1.2.16`** (and the `NoExtract` pin is removed
 automatically once the package crosses 1.2.16).
 
-`audio-fix` v3 installs a small B9406CAA-only `snd-soc-sof-sdw` DKMS overlay.
-It discards only an RT722 that the SoundWire core has positively marked
-`UNATTACHED`; real RT722 hardware and every other model are untouched. DKMS
-automatically rebuilds it on kernel updates, and install regenerates the boot
-initramfs. The upstream DMI patch [`0004`](upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch)
-remains the eventual in-kernel replacement.
+`audio-fix` 3.1 uses a small B9406CAA-only `snd-soc-sof-sdw` DKMS overlay only
+on kernels that still need it. It discards only an RT722 that the SoundWire
+core has positively marked `UNATTACHED`; real RT722 hardware and every other
+model are untouched. The permanent DMI fix is already accepted upstream as
+[`90af3209742d`](https://github.com/torvalds/linux/commit/90af3209742db61a7f9d7d054a16165818cfc6d8).
+Install inspects every installed kernel module rather than guessing from its
+version, skips DKMS on kernels containing the upstream quirk, and removes the
+overlay automatically once every installed kernel has it.
 
 | File | Path | What it does |
 |---|---|---|
@@ -216,58 +218,52 @@ remains the eventual in-kernel replacement.
 | `cs35l56+cs42l43-spk.conf`, `cs42l43-spk+cs35l56.conf` | `/usr/share/alsa/ucm2/sof-soundwire/` | The Speaker device for the combined codec — routes playback to `hw:,2` and the CS35L56 + CS42L43 amps. |
 | `cs42l43-spk+cs35l56-init.conf` | `/usr/share/alsa/ucm2/codecs/cs42l43-spk+cs35l56/` | Combined codec init (control remap + LED attach). `module.sh` symlinks `cs35l56+cs42l43-spk` → this so both kernel names resolve. |
 | `52-disable-bt-sco-offload.conf` | `/etc/wireplumber/wireplumber.conf.d/` | Disables the dead `SSP2-BT` offload PCM so its probe stops spamming the log. Bluetooth audio (A2DP/HFP) still works via the PipeWire software path. |
-| `dkms/asus-expertbook-sof-sdw-3.0.0/` | `/usr/src/` + `/lib/modules/*/updates/dkms/` | Filters the unfitted, `UNATTACHED` RT722 before DAI-link creation; rebuilt automatically for new kernels. |
+| `dkms/asus-expertbook-sof-sdw-3.0.0/` | `/usr/src/` + `/lib/modules/*/updates/dkms/` | Compatibility overlay for released kernels lacking upstream commit `90af3209742d`; not built where the in-kernel DMI quirk is detected. |
 
 > The **F1 speaker-mute LED can't be fixed from Linux** — this laptop exposes no
 > speaker-mute LED device, only `platform::micmute` (which the HiFi UCM drives).
 
 </details>
 
-### 3. [`wifi-fix`](wifi-fix/) — BE211: disable broken EHT, stabilize Wi-Fi 6
+### 3. [`wifi-fix`](wifi-fix/) — BE211: disable broken EHT, diagnose C106 warnings
 
 <details><summary><b>The bug</b> — Wi-Fi 7 / EHT is broken on BE211</summary>
 
 The core problem is **802.11be (EHT / Wi-Fi 7) itself** on the Intel BE211
-(`8086:e440`) under `iwlwifi`/`iwlmld`: the EHT RX path collapses to
+(`8086:e440`) under `iwlwifi`/`iwlmld`: the EHT RX path can collapse to
 **MCS0 / NSS1** and MLO sessions tear down, so the "Wi-Fi 7" link is slower and
-flakier than plain Wi-Fi 6. Not fixed upstream as of Linux 7.1-rc7. Two
-secondary irritants pile on: `iwlmld` defaults to `power_scheme=2` (beacon-loss
-recovery churn), and the `iwlwifi` TX-segmentation offload bug can throw
-`Microcode SW error` under heavy traffic.
+flakier than plain Wi-Fi 6 on this laptop.
 
 ```
-$ sudo dmesg | grep -E "missed beacons|Microcode SW error" | wc -l
-2046                                    ← with EHT on
-0                                       ← with disable_11be=Y (Wi-Fi 6 fallback)
+$ journalctl -k -b | grep -c "missed beacons exceeds"
+7228    # possible with Linux 7.2 C106 even on a strong, connected HE link
 ```
 
 </details>
 
-<details><summary><b>The fix</b> — disable broken EHT, keep a stable Wi-Fi 6 link</summary>
+<details><summary><b>The fix</b> — disable broken EHT and report the separate C106 warning flood honestly</summary>
 
-**Core fix** — drop the broken 802.11be layer so the radio runs as rock-solid
-Wi-Fi 6 (HE). Same approach Omarchy ships; verified at ~2.1 Gbit/s over 160 MHz
-6 GHz HE here:
+Drop the broken 802.11be layer so the radio runs as Wi-Fi 6 (HE). Same approach
+Omarchy ships; verified at ~2.1 Gbit/s over 160 MHz HE here:
 
 | File | Path | What it does |
 |---|---|---|
 | `iwlwifi-disable-eht.conf` | `/etc/modprobe.d/` | `options iwlwifi disable_11be=Y` — disables EHT / Wi-Fi 7; the link falls back to stable Wi-Fi 6 / HE. |
 
-**Secondary tunables** (trim remaining HE-mode instability; they do **not** keep
-Wi-Fi 7 alive):
+Linux 7.2 additionally loads C106 firmware, which can emit thousands of
+`missed beacons ... but receiving data` warnings while the link remains strong,
+fast and connected. Status shows the loaded firmware and count; it does not
+silence the warning or rewrite packaged firmware. Version 2.1 retires the old
+global ASPM-performance, power-scheme and offload tunables because they did not
+stop C106's warnings and were broader than the demonstrated bug.
 
-| File | Path | What it does |
-|---|---|---|
-| `iwlmld-active.conf` | `/etc/modprobe.d/` | `options iwlmld power_scheme=1` — disables driver-side power-save loop. |
-| `pcie-aspm-performance.conf` | `/etc/tmpfiles.d/` | Write `performance` to `/sys/module/pcie_aspm/parameters/policy` at boot. |
-| `90-iwlwifi-no-offload` | `/etc/NetworkManager/dispatcher.d/` | `ethtool -K $iface tso off gso off gro off` on every `iwlwifi` up event. |
-
-This is a deliberate **Wi-Fi 7 → Wi-Fi 6** downgrade — EHT is the problem on this
-silicon. `iwlwifi.bt_coex_active=Y` is left alone, so Bluetooth keeps working.
+This is a deliberate **Wi-Fi 7 → Wi-Fi 6** downgrade. Normal power management,
+offloads and `iwlwifi.bt_coex_active=Y` are retained, so Bluetooth coexistence
+continues to work.
 
 </details>
 
-### 4. [`display-fix`](display-fix/) — stable panel and working brightness
+### 4. [`display-fix`](display-fix/) — Linux 7.2 display defaults and working brightness
 
 <details><summary><b>The bug</b> — xe driver hangs Panel Replay handshake</summary>
 
@@ -294,32 +290,25 @@ and is **not** cured by disabling PSR.
 
 </details>
 
-<details><summary><b>The fix</b> — disable broken self-refresh and force VESA DPCD backlight</summary>
+<details><summary><b>The current fix</b> — retain repaired Linux 7.2 self-refresh defaults and force VESA DPCD backlight</summary>
 
 | File | Path | What it does |
 |---|---|---|
-| `xe-disable-psr.conf` | `/etc/modprobe.d/` | Belt-and-suspenders for late module load; also forces `enable_dpcd_backlight=2`. |
-| `limine-display.conf` | `/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf` | Adds `xe.enable_psr=0 xe.enable_psr2_sel_fetch=0 xe.enable_panel_replay=0 xe.enable_dpcd_backlight=2` to every Limine kernel entry. Value `2` forces the VESA AUX/DPCD interface when sysfs brightness otherwise changes without changing panel luminance. |
+| `xe-dpcd-backlight.conf` | `/etc/modprobe.d/` | Forces only `enable_dpcd_backlight=2` for a late xe module load. |
+| `limine-display.conf` | `/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf` | Adds only `xe.enable_dpcd_backlight=2` to every Limine kernel entry. Value `2` forces the VESA AUX/DPCD interface when sysfs brightness otherwise changes without changing panel luminance. |
 
-This is **structurally identical to the per-device entry** the upstream
-`drm-intel-next` branch is growing for Dell XPS 14/16. Our
-[`upstream-patches/0001`](upstream-patches/) ports the same approach to a
-proper `intel_dpcd_quirks[]` entry. It replaces only the global Panel Replay
-flag; the DPCD-backlight setting remains until the kernel chooses the correct
-interface automatically.
+Linux 7.2 contains generic Panther Lake Panel Replay/PSR/DC-state,
+selective-fetch, DSB and Xe recovery fixes. Version 1.3 therefore retires the
+older global `xe.enable_psr=0`, `xe.enable_psr2_sel_fetch=0` and
+`xe.enable_panel_replay=0` overrides. Install also archives the old Omarchy
+drop-in so it cannot silently re-add them. The independent DPCD brightness
+selection remains.
 
-`xe.enable_psr=0` is an additional conservative stability guard, not part of
-the brightness fix. Linux 7.1 gained relevant PSR/DC-state fixes, and
-[#7](https://github.com/burakgon/asus-expertbook-linux/issues/7) tracks whether
-PSR can now be left enabled while Panel Replay and selective fetch stay off.
-The flag remains the default until the same screen-capture, suspend and
-long-soak tests that previously exposed the hard freeze pass locally.
-
-There is **no dedicated upstream tracker** for this Panther Lake PSR2
-selective-fetch / DSB hang; it's reproduced locally on `linux-cachyos 7.0.11`
-and `linux-cachyos-rc 7.1-rc7`. (drm/xe #7513 — *"Lunar lake, rare shutdown
-under load"* — is a **distinct** Lunar Lake PMC-firmware bug, not this one.) No
-fix is merged on any current kernel, so the cmdline workaround is still required.
+[`upstream-patches/0001`](upstream-patches/) is retained only as a fallback,
+not as a submission-ready patch. If a long screen-capture, suspend/resume and
+mixed-use soak reproduces the old freeze on 7.2+, collect the failing journal
+in [issue #7](https://github.com/burakgon/asus-expertbook-linux/issues/7)
+before considering a device-scoped disable again.
 
 </details>
 
@@ -488,8 +477,8 @@ asus-expertbook-linux/
 ├── touchpad-fix/  …
 ├── webcam-ai-fix/  …
 ├── wifi-fix/  …
-├── upstream-patches/           # submission-ready upstream patches
-│   └── 0001…0003.patch
+├── upstream-patches/           # accepted/pending/retired upstream tracking
+│   └── 0001, 0003, 0004.patch
 ├── docs/                       # the GitHub Pages site
 └── scripts/
     └── check-hardware.sh       # one-shot compatibility check
@@ -561,15 +550,15 @@ needed.
 
 ## Upstream submissions
 
-The [`upstream-patches/`](upstream-patches/) folder ships four patches
-that turn each module into a permanent upstream entry:
+The [`upstream-patches/`](upstream-patches/) folder separates accepted,
+pending and retired work:
 
 | # | Tree | Replaces |
 |---|---|---|
-| `0001` | `drivers/gpu/drm/i915/display/intel_quirks.c` | `display-fix`'s global Panel Replay cmdline flag |
-| `0002` | `sound/soc/intel/boards/sof_sdw.c` | most of `audio-fix` (combined-codec UCM routing) |
-| `0003` | `libinput/quirks/30-vendor-pixart.quirks` | `touchpad-fix`'s libinput override |
-| `0004` | `drivers/soundwire/dmi-quirks.c` | `audio-fix`'s ghost-RT722 DKMS workaround |
+| `0001` | Linux display | Experimental fallback; held while 7.2 runs with PSR/Panel Replay defaults |
+| former `0002` | Linux sound | Removed: B9406CAA is not a sidecar-amplifier design |
+| `0003` | libinput | Pending PixArt pressure-axis quirk |
+| `0004` | Linux SoundWire | **Accepted** as upstream commit `90af3209742d`; retained for backports |
 
 See the tracking notes for current applicability against `torvalds/linux` /
 `drm-intel-next` / libinput main. See
@@ -640,14 +629,12 @@ missing-device limitation, not a profile issue.
 
 <details><summary><b>Why not just upstream all of this and skip the repo?</b></summary>
 
-That's the goal — see [`upstream-patches/`](upstream-patches/). Two of the
-audio pieces already landed: `alsa-ucm-conf 1.2.16` ships the
-`cs42l43-spk+cs35l56` codec dir and `linux-firmware-cirrus >= 20260519`
-ships the OEM blobs. The ghost-RT722 kernel quirk has not landed for this DMI,
-so `audio-fix` still carries its persistent DKMS overlay plus the topology-noise
-drop-in. As the kernel/quirk patches in `upstream-patches/` land and your
-distro picks them up, those local workarounds become deletable; the camera
-module remains a safe bridge for ASUS's Windows-packaged firmware capsule.
+That's the goal — see [`upstream-patches/`](upstream-patches/). The UCM and
+firmware are already released, and the B9406CAA ghost-RT722 kernel quirk landed
+in Linus' tree as `90af3209742d` after Linux 7.2. `audio-fix` detects backports
+from the installed module itself, so its DKMS compatibility overlay disappears
+as soon as all installed kernels contain the upstream fix. The camera module
+remains a safe bridge for ASUS's Windows-packaged firmware capsule.
 
 </details>
 

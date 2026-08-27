@@ -9,7 +9,7 @@
 #      upstream for 1043:15e4; the bundled blobs here are a fallback for older
 #      linux-firmware (same filenames the driver looks for).
 #
-#   2) The card reports a combined sidecar-amp speaker codec
+#   2) The card reports a combined speaker-codec component string
 #      ("spk:cs35l56+cs42l43-spk", or two "spk:" tags on older kernels). Stock
 #      alsa-ucm-conf 1.2.15.x has no UCM for it AND its SpeakerCodec regex drops
 #      the trailing "-spk", so the UCM fails to open and PipeWire falls back to
@@ -32,7 +32,9 @@
 #      New kernels keep it as UNATTACHED, but the generic sof_sdw machine driver
 #      still creates its SimpleJack DAI alongside the real CS42L43. The duplicate
 #      link aborts ALSA card registration. A board-scoped DKMS overlay filters
-#      only that unattached RT722 and is rebuilt automatically on kernel updates.
+#      only that unattached RT722 on released kernels that need it. Upstream
+#      commit 90af3209742d adds the permanent DMI quirk; install detects that
+#      marker per kernel and skips/removes the redundant overlay automatically.
 #
 #   4) The generic SOF topology declares an unused SSP2-BT hardware-offload PCM
 #      with no firmware blob; WirePlumber's probe of it spams the kernel log
@@ -47,8 +49,8 @@
 # platform::micmute (which the HiFi UCM does drive).
 
 MODULE_NAME="audio-fix"
-MODULE_DESC="B9406CAA audio: ghost-RT722 DKMS fix + HiFi UCM + cs35l56 firmware"
-MODULE_VERSION="3.0.0"
+MODULE_DESC="B9406CAA audio: adaptive ghost-RT722 fix + HiFi UCM + cs35l56 firmware"
+MODULE_VERSION="3.1.0"
 
 AUDIO_DKMS_NAME="asus-expertbook-sof-sdw"
 AUDIO_DKMS_VERSION="3.0.0"
@@ -90,6 +92,64 @@ ucm_hifi_is_upstream() {
   [[ $lowest == 1.2.16 ]]
 }
 
+# audio_kernel_has_upstream_ghost_quirk [kernel-release]
+#
+# Do not rely on a kernel version: distributions may backport the fix. The
+# accepted SoundWire DMI entry embeds the exact board name in soundwire_bus, so
+# inspecting that module is both backport-safe and independent of the running
+# kernel. Commit: 90af3209742db61a7f9d7d054a16165818cfc6d8.
+audio_kernel_has_upstream_ghost_quirk() {
+  local kernel="${1:-$(uname -r)}" module marker=""
+  module="$(modinfo -k "$kernel" -n soundwire_bus 2>/dev/null || true)"
+  [[ -f $module ]] || return 1
+
+  case "$module" in
+    *.zst) marker="$(zstdcat -- "$module" 2>/dev/null | strings | grep -F 'B9406CAA' || true)" ;;
+    *.xz)  marker="$(xzcat -- "$module" 2>/dev/null | strings | grep -F 'B9406CAA' || true)" ;;
+    *.gz)  marker="$(gzip -cd -- "$module" 2>/dev/null | strings | grep -F 'B9406CAA' || true)" ;;
+    *)     marker="$(strings -- "$module" 2>/dev/null | grep -F 'B9406CAA' || true)" ;;
+  esac
+  [[ -n $marker ]]
+}
+
+audio_dkms_installed_for_kernel() {
+  local kernel="${1:-$(uname -r)}" status=""
+  command -v dkms >/dev/null 2>&1 || return 1
+  status="$(dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
+    -k "$kernel" 2>/dev/null || true)"
+  [[ $status == *installed* ]]
+}
+
+# Make `list`/`update-all` offer reconciliation after a distro kernel gains the
+# upstream DMI quirk, and catch a missing overlay on older kernels.
+module_install_state() {
+  local files installed
+  files="$(mod_files_state)"
+  installed="$(mod_get_installed_version)"
+  case "$files" in
+    none) echo not-installed; return ;;
+    some) echo partial; return ;;
+  esac
+
+  if audio_kernel_has_upstream_ghost_quirk; then
+    if audio_dkms_installed_for_kernel; then
+      echo update-available
+      return
+    fi
+  elif ! audio_dkms_installed_for_kernel; then
+    echo partial
+    return
+  fi
+
+  if [[ -z $installed ]]; then
+    echo untracked
+  elif [[ $installed == "$MODULE_VERSION" ]]; then
+    echo up-to-date
+  else
+    echo update-available
+  fi
+}
+
 audio_remove_legacy_dkms() {
   local legacy name version source
   for legacy in "sof-sdw-simplejack-fix/0.1" "soundwire-intel-b9406-ghostfix/0.1"; do
@@ -97,7 +157,7 @@ audio_remove_legacy_dkms() {
     version="${legacy#*/}"
     source="/usr/src/${name}-${version}"
 
-    if dkms status -m "$name" -v "$version" 2>/dev/null | grep -q .; then
+    if [[ -n $(dkms status -m "$name" -v "$version" 2>/dev/null || true) ]]; then
       log "[audio-fix] removing superseded DKMS module $legacy"
       dkms remove -m "$name" -v "$version" --all || \
         warn "[audio-fix] DKMS could not completely remove $legacy"
@@ -137,33 +197,60 @@ audio_require_build_tools() {
 }
 
 audio_install_dkms() {
-  local kernel kernel_dir installed=0
+  local kernel kernel_dir installed=0 needed=0
+  local -a build_kernels=()
 
   [[ -f $AUDIO_DKMS_SOURCE/dkms.conf ]] || \
     die "[audio-fix] bundled DKMS source is missing: $AUDIO_DKMS_SOURCE"
 
-  audio_require_build_tools
   audio_remove_legacy_dkms
+  # Preserve the previous convenience for the common case: when the running
+  # kernel still needs DKMS, install its matching headers before inventorying
+  # buildable kernels.
+  if ! audio_kernel_has_upstream_ghost_quirk; then
+    audio_require_build_tools
+  fi
 
-  if dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
-      2>/dev/null | grep -q .; then
+  if command -v dkms >/dev/null 2>&1 && \
+     [[ -n $(dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
+       2>/dev/null || true) ]]; then
     log "[audio-fix] refreshing existing DKMS registration"
     dkms remove -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" --all
   fi
 
   rm -rf -- "$AUDIO_DKMS_TARGET"
-  install -d -m 0755 "$AUDIO_DKMS_TARGET"
-  cp -a -- "$AUDIO_DKMS_SOURCE/." "$AUDIO_DKMS_TARGET/"
-  dkms add -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION"
 
   for kernel_dir in /usr/lib/modules/*; do
     [[ -d $kernel_dir ]] || continue
     kernel="${kernel_dir##*/}"
-    if [[ ! -e $kernel_dir/build/Makefile ]]; then
-      warn "[audio-fix] skipping $kernel: matching kernel headers are not installed"
+    if audio_kernel_has_upstream_ghost_quirk "$kernel"; then
+      log "[audio-fix] $kernel contains upstream B9406CAA ghost-RT722 quirk; DKMS not needed"
       continue
     fi
 
+    needed=$(( needed + 1 ))
+    if [[ ! -e $kernel_dir/build/Makefile ]]; then
+      warn "[audio-fix] skipping $kernel: upstream quirk absent and matching headers are not installed"
+      continue
+    fi
+    build_kernels+=("$kernel")
+  done
+
+  if (( needed == 0 )); then
+    log "[audio-fix] every installed kernel contains the upstream DMI quirk; removed redundant DKMS overlay"
+    audio_refresh_initramfs "with the stock upstream SoundWire quirk"
+    return
+  fi
+
+  (( ${#build_kernels[@]} > 0 )) || \
+    die "[audio-fix] kernels need the ghost-RT722 overlay, but no matching headers were found"
+
+  audio_require_build_tools
+  install -d -m 0755 "$AUDIO_DKMS_TARGET"
+  cp -a -- "$AUDIO_DKMS_SOURCE/." "$AUDIO_DKMS_TARGET/"
+  dkms add -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION"
+
+  for kernel in "${build_kernels[@]}"; do
     log "[audio-fix] building DKMS overlay for $kernel"
     dkms install -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" -k "$kernel"
     installed=$(( installed + 1 ))
@@ -171,31 +258,31 @@ audio_install_dkms() {
 
   (( installed > 0 )) || die "[audio-fix] no kernel with matching headers was found"
 
+  audio_refresh_initramfs "with the DKMS overlay"
+}
+
+audio_refresh_initramfs() {
+  local reason="${1:-after the audio driver change}"
   # sof_sdw may be included in an autodetected initramfs. Rebuild it now so the
-  # stock copy cannot load before /usr is available. Normal pacman kernel hooks
-  # run DKMS before mkinitcpio, preserving the same ordering on future updates.
+  # selected stock/DKMS copy is consistent at the next boot.
   if command -v limine-mkinitcpio >/dev/null 2>&1; then
-    log "[audio-fix] rebuilding Limine initramfs entries with the DKMS overlay"
+    log "[audio-fix] rebuilding Limine initramfs entries $reason"
     limine-mkinitcpio
   elif command -v mkinitcpio >/dev/null 2>&1; then
-    log "[audio-fix] rebuilding initramfs images with the DKMS overlay"
+    log "[audio-fix] rebuilding initramfs images $reason"
     mkinitcpio -P
   fi
 }
 
 audio_remove_dkms() {
   if command -v dkms >/dev/null 2>&1 && \
-     dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
-       2>/dev/null | grep -q .; then
+     [[ -n $(dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
+       2>/dev/null || true) ]]; then
     dkms remove -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" --all
   fi
   rm -rf -- "$AUDIO_DKMS_TARGET"
 
-  if command -v limine-mkinitcpio >/dev/null 2>&1; then
-    limine-mkinitcpio
-  elif command -v mkinitcpio >/dev/null 2>&1; then
-    mkinitcpio -P
-  fi
+  audio_refresh_initramfs "after removing the DKMS overlay"
 }
 
 module_post_install() {
@@ -212,7 +299,7 @@ module_post_install() {
     fi
   else
     # alsa-ucm-conf < 1.2.16 (or non-Arch): install the upstream-master UCM files
-    # so the combined sidecar codec resolves to a real HiFi profile.
+    # so the combined speaker codec resolves to a real HiFi profile.
     local entry src dst
     for entry in "${UCM_FILES[@]}"; do
       src="${entry%%:*}"; dst="${entry#*:}"
@@ -263,7 +350,15 @@ module_status_extra() {
   dkms_state="$(dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
     -k "$(uname -r)" 2>/dev/null || true)"
   module_path="$(modinfo -n snd-soc-sof-sdw 2>/dev/null || true)"
-  if [[ $dkms_state == *installed* && $module_path == */updates/dkms/* ]]; then
+  if audio_kernel_has_upstream_ghost_quirk; then
+    if [[ $module_path == */updates/dkms/* ]]; then
+      printf '  kernel:   %supstream B9406CAA quirk present; redundant DKMS is still selected — update audio-fix and reboot%s\n' \
+        "$c_warn" "$c_off"
+    else
+      printf '  kernel:   %supstream B9406CAA ghost-RT722 quirk active; DKMS not needed%s\n' \
+        "$c_ok" "$c_off"
+    fi
+  elif [[ $dkms_state == *installed* && $module_path == */updates/dkms/* ]]; then
     printf '  DKMS:     %soverlay v%s installed for %s%s\n' \
       "$c_ok" "$AUDIO_DKMS_VERSION" "$(uname -r)" "$c_off"
   elif [[ $dkms_state == *installed* ]]; then
