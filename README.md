@@ -304,8 +304,16 @@ and is **not** cured by disabling PSR.
 This is **structurally identical to the per-device entry** the upstream
 `drm-intel-next` branch is growing for Dell XPS 14/16. Our
 [`upstream-patches/0001`](upstream-patches/) ports the same approach to a
-proper `intel_dpcd_quirks[]` entry — once merged, this module becomes a
-no-op and can be uninstalled.
+proper `intel_dpcd_quirks[]` entry. It replaces only the global Panel Replay
+flag; the DPCD-backlight setting remains until the kernel chooses the correct
+interface automatically.
+
+`xe.enable_psr=0` is an additional conservative stability guard, not part of
+the brightness fix. Linux 7.1 gained relevant PSR/DC-state fixes, and
+[#7](https://github.com/burakgon/asus-expertbook-linux/issues/7) tracks whether
+PSR can now be left enabled while Panel Replay and selective fetch stay off.
+The flag remains the default until the same screen-capture, suspend and
+long-soak tests that previously exposed the hard freeze pass locally.
 
 There is **no dedicated upstream tracker** for this Panther Lake PSR2
 selective-fetch / DSB hang; it's reproduced locally on `linux-cachyos 7.0.11`
@@ -558,7 +566,7 @@ that turn each module into a permanent upstream entry:
 
 | # | Tree | Replaces |
 |---|---|---|
-| `0001` | `drivers/gpu/drm/i915/display/intel_quirks.c` | `display-fix`'s PSR / Panel Replay cmdline flags |
+| `0001` | `drivers/gpu/drm/i915/display/intel_quirks.c` | `display-fix`'s global Panel Replay cmdline flag |
 | `0002` | `sound/soc/intel/boards/sof_sdw.c` | most of `audio-fix` (combined-codec UCM routing) |
 | `0003` | `libinput/quirks/30-vendor-pixart.quirks` | `touchpad-fix`'s libinput override |
 | `0004` | `drivers/soundwire/dmi-quirks.c` | `audio-fix`'s ghost-RT722 DKMS workaround |

@@ -24,8 +24,10 @@ backlight interface for this panel automatically.
   upstream patch, even from Intel's own engineers ("disabled by default,
   at least until the underlying issue can be sorted out", per Phoronix
   for the Dell entry).
-- **Replaces:** the PSR / Panel Replay portion of `display-fix`; the separate
-  DPCD-backlight setting remains until panel brightness works automatically.
+- **Replaces:** the global `xe.enable_panel_replay=0` part of `display-fix`.
+  The separate DPCD-backlight setting remains until panel brightness works
+  automatically, and the conservative PSR guard is tracked separately in
+  [issue #7](https://github.com/burakgon/asus-expertbook-linux/issues/7).
 
 ### `0002-ASoC-Intel-sof_sdw-Add-quirk-for-ASUS-ExpertBook-Ult.patch`
 

@@ -21,9 +21,9 @@ Tested on:
   - Linux 7.0.x and 7.1.x (CachyOS variants)
   - eDP panel: Samsung Display Corp ("SDC") product 0x4217
 
-Without this patch the laptop's only workaround is xe.enable_psr=0 on
-the kernel cmdline, which globally disables Panel Replay for the system
-even when other displays could use it safely.
+Without this patch the laptop needs xe.enable_panel_replay=0 on the kernel
+cmdline, which disables Panel Replay globally instead of applying the quirk
+only to this panel.
 
 Signed-off-by: burakgon <burakgon12@gmail.com>
 ---

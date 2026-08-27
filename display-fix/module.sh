@@ -28,7 +28,9 @@
 # related but DISTINCT Lunar Lake PMC-firmware shutdown bug — "rare
 # shutdown under load", label platform: LNL, leaves a BERT Hardware Error
 # and is NOT cured by disabling PSR — so it is NOT this bug.) The cmdline
-# workaround below is therefore still required on every current kernel.
+# workaround below remains the conservative default. Linux 7.1 added relevant
+# PSR fixes; issue #7 tracks long-soak testing of PSR enabled while Panel Replay
+# and selective fetch remain disabled.
 
 MODULE_NAME="display-fix"
 MODULE_DESC="B9406CAA xe: stable panel plus working DPCD brightness control"

@@ -841,6 +841,14 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
           <li><code>/etc/modprobe.d/xe-disable-psr.conf</code> — disables PSR / Panel Replay and forces <code>enable_dpcd_backlight=2</code> for any late module load</li>
           <li><code>/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf</code> — appends <code>xe.enable_psr=0 xe.enable_psr2_sel_fetch=0 xe.enable_panel_replay=0 xe.enable_dpcd_backlight=2</code>; the post-install hook calls <code>limine-update</code></li>
         </ul>
+        <p>
+          <code>enable_psr=0</code> is an extra conservative stability guard,
+          not a brightness requirement. Linux 7.1 gained relevant PSR fixes;
+          <a href="https://github.com/burakgon/asus-expertbook-linux/issues/7">issue #7</a>
+          tracks the long-soak, suspend and screen-capture testing required
+          before the repo safely re-enables PSR by default. Upstream patch
+          <code>0001</code> replaces only the global Panel Replay flag.
+        </p>
       </details>
 
       <details>
@@ -1053,7 +1061,7 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
           <tr>
             <td><span class="mono">0001</span></td>
             <td><code>drivers/gpu/drm/i915/display/intel_quirks.c</code></td>
-            <td><code>display-fix</code>'s PSR / Panel Replay cmdline flags</td>
+            <td><code>display-fix</code>'s global Panel Replay cmdline flag</td>
           </tr>
           <tr>
             <td><span class="mono">0002</span></td>
