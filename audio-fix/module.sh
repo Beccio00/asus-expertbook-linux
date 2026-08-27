@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # audio-fix module manifest. Sourced by ../patch.sh.
 #
 # Restores full speaker + headphone audio on the ASUS ExpertBook Ultra B9406CAA
@@ -27,7 +28,13 @@
 #      still on alsa-ucm-conf < 1.2.16 (see module_post_install). On 1.2.16+ the
 #      module is effectively firmware + SSP2-BT-noise-fix only.
 #
-#   3) The generic SOF topology declares an unused SSP2-BT hardware-offload PCM
+#   3) B9406CAA firmware advertises a ghost RT722 SoundWire codec on link 3.
+#      New kernels keep it as UNATTACHED, but the generic sof_sdw machine driver
+#      still creates its SimpleJack DAI alongside the real CS42L43. The duplicate
+#      link aborts ALSA card registration. A board-scoped DKMS overlay filters
+#      only that unattached RT722 and is rebuilt automatically on kernel updates.
+#
+#   4) The generic SOF topology declares an unused SSP2-BT hardware-offload PCM
 #      with no firmware blob; WirePlumber's probe of it spams the kernel log
 #      (~40% of all kernel errors at boot). 52-disable-bt-sco-offload.conf
 #      disables that node. Bluetooth audio (A2DP music + HFP calls) keeps
@@ -40,8 +47,13 @@
 # platform::micmute (which the HiFi UCM does drive).
 
 MODULE_NAME="audio-fix"
-MODULE_DESC="ASUS ExpertBook Ultra (B9406CAA) speaker/headphone audio via HiFi UCM + cs35l56 firmware"
-MODULE_VERSION="2.1.1"
+MODULE_DESC="B9406CAA audio: ghost-RT722 DKMS fix + HiFi UCM + cs35l56 firmware"
+MODULE_VERSION="3.0.0"
+
+AUDIO_DKMS_NAME="asus-expertbook-sof-sdw"
+AUDIO_DKMS_VERSION="3.0.0"
+AUDIO_DKMS_SOURCE="$MODULE_DIR/dkms/${AUDIO_DKMS_NAME}-${AUDIO_DKMS_VERSION}"
+AUDIO_DKMS_TARGET="/usr/src/${AUDIO_DKMS_NAME}-${AUDIO_DKMS_VERSION}"
 
 # Always-installed payload: OEM firmware (fallback for linux-firmware-cirrus
 # < 20260519) + the SSP2-BT topology-noise silencer. The HiFi UCM files are
@@ -78,7 +90,117 @@ ucm_hifi_is_upstream() {
   [[ $lowest == 1.2.16 ]]
 }
 
+audio_remove_legacy_dkms() {
+  local legacy name version source
+  for legacy in "sof-sdw-simplejack-fix/0.1" "soundwire-intel-b9406-ghostfix/0.1"; do
+    name="${legacy%/*}"
+    version="${legacy#*/}"
+    source="/usr/src/${name}-${version}"
+
+    if dkms status -m "$name" -v "$version" 2>/dev/null | grep -q .; then
+      log "[audio-fix] removing superseded DKMS module $legacy"
+      dkms remove -m "$name" -v "$version" --all || \
+        warn "[audio-fix] DKMS could not completely remove $legacy"
+    fi
+
+    # These are exact names of the two experimental modules superseded by this
+    # repository. Never use a wildcard here.
+    rm -rf -- "$source"
+  done
+}
+
+audio_require_build_tools() {
+  local missing=() package
+  for package in dkms make clang; do
+    command -v "$package" >/dev/null 2>&1 || missing+=("$package")
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    if command -v pacman >/dev/null 2>&1; then
+      log "[audio-fix] installing required build tools: ${missing[*]}"
+      pacman -S --needed --noconfirm "${missing[@]}"
+    else
+      die "[audio-fix] missing build tools: ${missing[*]}"
+    fi
+  fi
+
+  if [[ ! -e /lib/modules/$(uname -r)/build/Makefile ]]; then
+    if command -v pacman >/dev/null 2>&1 && \
+       [[ -r /lib/modules/$(uname -r)/pkgbase ]]; then
+      package="$(<"/lib/modules/$(uname -r)/pkgbase")-headers"
+      log "[audio-fix] installing running-kernel headers: $package"
+      pacman -S --needed --noconfirm "$package"
+    else
+      die "[audio-fix] kernel headers missing for $(uname -r)"
+    fi
+  fi
+}
+
+audio_install_dkms() {
+  local kernel kernel_dir installed=0
+
+  [[ -f $AUDIO_DKMS_SOURCE/dkms.conf ]] || \
+    die "[audio-fix] bundled DKMS source is missing: $AUDIO_DKMS_SOURCE"
+
+  audio_require_build_tools
+  audio_remove_legacy_dkms
+
+  if dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
+      2>/dev/null | grep -q .; then
+    log "[audio-fix] refreshing existing DKMS registration"
+    dkms remove -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" --all
+  fi
+
+  rm -rf -- "$AUDIO_DKMS_TARGET"
+  install -d -m 0755 "$AUDIO_DKMS_TARGET"
+  cp -a -- "$AUDIO_DKMS_SOURCE/." "$AUDIO_DKMS_TARGET/"
+  dkms add -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION"
+
+  for kernel_dir in /usr/lib/modules/*; do
+    [[ -d $kernel_dir ]] || continue
+    kernel="${kernel_dir##*/}"
+    if [[ ! -e $kernel_dir/build/Makefile ]]; then
+      warn "[audio-fix] skipping $kernel: matching kernel headers are not installed"
+      continue
+    fi
+
+    log "[audio-fix] building DKMS overlay for $kernel"
+    dkms install -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" -k "$kernel"
+    installed=$(( installed + 1 ))
+  done
+
+  (( installed > 0 )) || die "[audio-fix] no kernel with matching headers was found"
+
+  # sof_sdw may be included in an autodetected initramfs. Rebuild it now so the
+  # stock copy cannot load before /usr is available. Normal pacman kernel hooks
+  # run DKMS before mkinitcpio, preserving the same ordering on future updates.
+  if command -v limine-mkinitcpio >/dev/null 2>&1; then
+    log "[audio-fix] rebuilding Limine initramfs entries with the DKMS overlay"
+    limine-mkinitcpio
+  elif command -v mkinitcpio >/dev/null 2>&1; then
+    log "[audio-fix] rebuilding initramfs images with the DKMS overlay"
+    mkinitcpio -P
+  fi
+}
+
+audio_remove_dkms() {
+  if command -v dkms >/dev/null 2>&1 && \
+     dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
+       2>/dev/null | grep -q .; then
+    dkms remove -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" --all
+  fi
+  rm -rf -- "$AUDIO_DKMS_TARGET"
+
+  if command -v limine-mkinitcpio >/dev/null 2>&1; then
+    limine-mkinitcpio
+  elif command -v mkinitcpio >/dev/null 2>&1; then
+    mkinitcpio -P
+  fi
+}
+
 module_post_install() {
+  audio_install_dkms
+
   if ucm_hifi_is_upstream; then
     local v; v="$(pacman -Q alsa-ucm-conf 2>/dev/null | awk '{print $2}')"
     log "[audio-fix] alsa-ucm-conf ${v} ships the cs35l56+cs42l43-spk HiFi UCM upstream -- not installing bundled UCM (firmware-only)."
@@ -113,6 +235,8 @@ module_post_install() {
 }
 
 module_post_uninstall() {
+  audio_remove_dkms
+
   # Only tear down UCM files we placed ourselves. When alsa-ucm-conf >= 1.2.16
   # owns them, leave them be -- removing package files would break audio and
   # re-trigger the file-conflict on the next upgrade.
@@ -133,10 +257,24 @@ module_post_uninstall() {
 }
 
 module_status_extra() {
-  local fw_state="" prof="" kmsg cards
+  local fw_state="" prof="" kmsg cards dkms_state module_path
   kmsg="$(journalctl -k -b 0 --no-pager 2>/dev/null || true)"
-  if [[ $kmsg == *"Calibration applied"* ]]; then
-    fw_state="${c_ok}cs35l56 firmware patched, calibration applied${c_off}"
+
+  dkms_state="$(dkms status -m "$AUDIO_DKMS_NAME" -v "$AUDIO_DKMS_VERSION" \
+    -k "$(uname -r)" 2>/dev/null || true)"
+  module_path="$(modinfo -n snd-soc-sof-sdw 2>/dev/null || true)"
+  if [[ $dkms_state == *installed* && $module_path == */updates/dkms/* ]]; then
+    printf '  DKMS:     %soverlay v%s installed for %s%s\n' \
+      "$c_ok" "$AUDIO_DKMS_VERSION" "$(uname -r)" "$c_off"
+  elif [[ $dkms_state == *installed* ]]; then
+    printf '  DKMS:     %sinstalled, but modinfo resolves to %s; run depmod/reboot%s\n' \
+      "$c_warn" "${module_path:--}" "$c_off"
+  else
+    printf '  DKMS:     %snot installed for running kernel %s%s\n' \
+      "$c_warn" "$(uname -r)" "$c_off"
+  fi
+  if [[ $kmsg == *"Calibration applied"* || $kmsg == *"Tuning PID:"* ]]; then
+    fw_state="${c_ok}cs35l56 tuning firmware loaded${c_off}"
   elif [[ $kmsg == *"FIRMWARE_MISSING"* ]]; then
     fw_state="${c_warn}cs35l56 FIRMWARE_MISSING -- no OEM bin/wmfw${c_off}"
   else
@@ -153,9 +291,13 @@ module_status_extra() {
     printf '  card:     %sno ALSA sound card registered (PipeWire will show Dummy Output)%s\n' \
       "$c_warn" "$c_off"
     if grep -Eq 'SDW3-Playback-SimpleJack|sof_sdw.*(error -12|failed with error -12)' <<<"$kmsg"; then
-      printf '  kernel:   %sghost rt722 duplicate-link failure detected; audio-fix cannot repair this in userspace%s\n' \
-        "$c_warn" "$c_off"
-      printf '            apply upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch to the running kernel\n'
+      if [[ $dkms_state == *installed* ]]; then
+        printf '  kernel:   %sghost RT722 failure is from the current boot; reboot once to load the installed DKMS fix%s\n' \
+          "$c_warn" "$c_off"
+      else
+        printf '  kernel:   %sghost RT722 duplicate-link failure detected; install/update audio-fix%s\n' \
+          "$c_warn" "$c_off"
+      fi
     else
       printf '  kernel:   %sinspect: journalctl -k -b | grep -Ei "sof|soundwire|cs35|cs42|snd"%s\n' \
         "$c_dim" "$c_off"

@@ -104,6 +104,10 @@ mod_clear_installed_version() {
 # echoes one of: not-installed | up-to-date | update-available | untracked | partial
 mod_install_state() {
   local files installed
+  if declare -F module_install_state >/dev/null; then
+    module_install_state
+    return
+  fi
   files="$(mod_files_state)"
   installed="$(mod_get_installed_version)"
   case "$files" in
@@ -166,10 +170,24 @@ mod_files_state() {
 # Per-module operation wrappers (invoked inside `with_module` subshell).
 
 do_install_one() {
-  local prev
+  local prev rc=0
   prev="$(mod_get_installed_version)"
-  mod_install_files
-  declare -F module_post_install >/dev/null && module_post_install || true
+
+  if declare -F module_install >/dev/null; then
+    module_install || rc=$?
+    if (( rc == 10 )); then
+      warn "[$MODULE_NAME] skipped"
+      return 0
+    elif (( rc != 0 )); then
+      return "$rc"
+    fi
+  else
+    mod_install_files
+    if declare -F module_post_install >/dev/null; then
+      module_post_install
+    fi
+  fi
+
   mod_set_installed_version
   if [[ -z $prev ]]; then
     printf '%sOK%s   [%s] installed v%s\n' "$c_ok" "$c_off" \
@@ -184,8 +202,18 @@ do_install_one() {
 }
 
 do_uninstall_one() {
+  local had_payload=0 prev
+  prev="$(mod_get_installed_version)"
   if mod_remove_files; then
-    declare -F module_post_uninstall >/dev/null && module_post_uninstall || true
+    had_payload=1
+  fi
+
+  # Hook-only modules have no MODULE_FILES to remove. Run their teardown only
+  # when a state file proves the patcher previously installed them.
+  if (( had_payload )) || [[ -n $prev ]]; then
+    if declare -F module_post_uninstall >/dev/null; then
+      module_post_uninstall
+    fi
     mod_clear_installed_version
     printf '%sOK%s   [%s] uninstalled\n' "$c_ok" "$c_off" "$MODULE_NAME"
   else
@@ -200,7 +228,7 @@ do_list_one() {
 
 # Column widths (visible chars only — color codes wrap padded text).
 _TBL_W_IDX=3
-_TBL_W_NAME=18
+_TBL_W_NAME=25
 _TBL_W_CUR=8
 _TBL_W_INSTALLED=9
 _TBL_W_STATE=14
@@ -249,6 +277,12 @@ _table_row() {
   state="$(mod_install_state)"
   installed="$(mod_get_installed_version)"
   cur="${MODULE_VERSION:-0}"
+  # Runtime-managed modules (for example UEFI firmware) can determine that the
+  # target version is already present without having a patcher state file.
+  if [[ -z $installed && $state == up-to-date ]] && \
+     declare -F module_install_state >/dev/null; then
+    installed="$cur"
+  fi
   case "$state" in
     up-to-date)       color="$c_ok";   label="up to date" ;;
     update-available) color="$c_warn"; label="update avail" ;;
@@ -301,7 +335,7 @@ do_diff_one() {
 }
 
 do_status_one() {
-  local entry src dst installed cur state version_line
+  local entry src dst installed cur state version_line file_count=0
   installed="$(mod_get_installed_version)"
   cur="${MODULE_VERSION:-0}"
   state="$(mod_install_state)"
@@ -316,6 +350,7 @@ do_status_one() {
   printf '  version:  %s\n' "$version_line"
   printf '  files:\n'
   for entry in "${MODULE_FILES[@]}"; do
+    file_count=$(( file_count + 1 ))
     src="${entry%%:*}"; dst="${entry#*:}"
     if [[ -e $dst ]]; then
       printf '    %sOK%s   %s\n' "$c_ok" "$c_off" "$dst"
@@ -323,6 +358,9 @@ do_status_one() {
       printf '    %s--%s   %s (not installed)\n' "$c_dim" "$c_off" "$dst"
     fi
   done
+  if (( file_count == 0 )); then
+    printf '    %s(runtime-managed module; see status below)%s\n' "$c_dim" "$c_off"
+  fi
   declare -F module_status_extra >/dev/null && module_status_extra || true
   echo
 }

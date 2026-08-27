@@ -1,7 +1,7 @@
 # ASUS ExpertBook Ultra (B9406CAA) — speaker / headphone audio fix on Linux
 
 Out of the box on Linux 6.18+, the internal speakers are silent (and the F1
-mute LED is stuck "on"). Three independent problems stack up:
+mute LED is stuck "on"). Four independent problems stack up:
 
 1. **CS35L56 firmware missing.** The Cirrus **CS35L56** speaker amplifiers boot
    in `FIRMWARE_MISSING` state. They each need a per-OEM `.bin` (tuning) **and**
@@ -20,7 +20,14 @@ mute LED is stuck "on"). Three independent problems stack up:
    `aplay -D plughw:0,2` works. **`alsa-ucm-conf 1.2.16` ships the fix upstream**
    (the exact files below, verbatim).
 
-3. **Dead SSP2-BT topology node.** The generic SOF topology declares an unused
+3. **Ghost RT722 prevents ALSA card registration.** B9406CAA firmware describes
+   a Realtek RT722 on SoundWire link 3 even though the peripheral is not fitted.
+   Current kernels leave it `UNATTACHED` but still build a second
+   `SDW3-Playback-SimpleJack` beside the real CS42L43. The duplicate sysfs link
+   aborts `sof_sdw` with `-EEXIST` / error `-12`, leaving PipeWire with only
+   **Dummy Output**.
+
+4. **Dead SSP2-BT topology node.** The generic SOF topology declares an unused
    `SSP2-BT` hardware-offload PCM with no firmware blob; WirePlumber's probe of
    it spams the kernel log (`SSP2-BT.capture: failed to prepare`, ~40% of all
    kernel errors at boot).
@@ -30,14 +37,17 @@ mute LED is stuck "on"). Three independent problems stack up:
 Installs the proper **HiFi UCM** profile (not a profile hack): named ports,
 headphone-jack **auto-switching**, working volume, and the mic-mute LED. The
 result is a real `HiFi__Speaker__sink` on PCM device 2 with all 6 speakers and
-the CS35L56 DSP running calibrated firmware.
+the CS35L56 DSP running calibrated firmware. A B9406CAA-only DKMS overlay for
+`snd-soc-sof-sdw` removes only the exact RT722 device when the SoundWire core
+reports it as `UNATTACHED`. DKMS rebuilds that overlay for every installed
+kernel, so a normal kernel update no longer overwrites the fix.
 
 > **The UCM half is upstream as of `alsa-ucm-conf 1.2.16`.** On a system with
 > `alsa-ucm-conf >= 1.2.16` this module installs **no** files under
 > `/usr/share/alsa/ucm2` and adds **no** `NoExtract` pin — the UCM already
 > belongs to the package, and dropping our own copies in would only create a
 > pacman file-conflict on the next `alsa-ucm-conf` upgrade. There it is
-> effectively **firmware + SSP2-BT-noise-fix only**. The bundled UCM files are
+> effectively **DKMS + firmware + SSP2-BT-noise-fix only**. The bundled UCM files are
 > kept purely as a fallback for systems still on `alsa-ucm-conf < 1.2.16`, where
 > `module_post_install` drops them in and pins `sof-soundwire.conf`.
 
@@ -50,6 +60,7 @@ the CS35L56 DSP running calibrated firmware.
 | `cs35l56-…-l2u0.bin` / `.wmfw` | `/lib/firmware/cirrus/` | Per-OEM tuning + ROM `3.4.4`→`3.13.4` patch, left amp. **Fallback** for `linux-firmware-cirrus < 20260519`. |
 | `cs35l56-…-l2u1.bin` / `.wmfw` | `/lib/firmware/cirrus/` | Same, right amp. |
 | `52-disable-bt-sco-offload.conf` | `/etc/wireplumber/wireplumber.conf.d/` | Disables the dead `SSP2-BT` offload PCM so its probe stops spamming the log. A2DP/HFP Bluetooth still works via the PipeWire software path. |
+| `dkms/asus-expertbook-sof-sdw-3.0.0/` | `/usr/src/asus-expertbook-sof-sdw-3.0.0/` + `/lib/modules/*/updates/dkms/` | Board-scoped ghost-RT722 filter. `AUTOINSTALL=yes` rebuilds it on kernel updates; install also regenerates initramfs images. |
 
 ### Installed only on `alsa-ucm-conf < 1.2.16` (otherwise the package provides them)
 
@@ -108,14 +119,15 @@ journalctl -k -b | grep -Ei 'sof|soundwire|cs35|cs42|snd'
 An empty card list together with `SDW3-Playback-SimpleJack`, `-EEXIST`, or
 `sof_sdw ... error -12` in the kernel log is the known phantom-RT722 failure.
 The duplicate SoundWire link aborts the `sof_sdw` probe before firmware, UCM,
-PipeWire, or WirePlumber can participate. Restarting WirePlumber and
-reinstalling this module cannot create the missing card.
+PipeWire, or WirePlumber can participate. Install `audio-fix` v3.0.0 and reboot
+once. Its DKMS module is the packaged, persistent workaround;
+`./patch.sh status audio-fix` verifies the registration and selected module
+path for the running kernel.
 
-The kernel-side fix is
+The preferred permanent upstream fix remains
 [`upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch`](../upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch).
-It must be applied to the kernel you boot; merely having the patch file in this
-repository does not modify a distribution kernel. `./patch.sh status
-audio-fix` now detects this failure signature and points to that patch.
+Once a released kernel contains that B9406CAA DMI quirk, the DKMS overlay can
+be removed.
 
 ## Uninstall
 
@@ -124,9 +136,10 @@ audio-fix` now detects this failure signature and points to that patch.
 sudo reboot
 ```
 
-On `alsa-ucm-conf >= 1.2.16` the uninstall only removes the firmware blobs and
-the SSP2-BT drop-in — the HiFi UCM is left in place because it belongs to the
-package, not to this module.
+On `alsa-ucm-conf >= 1.2.16` uninstall removes the DKMS overlay, firmware
+fallbacks and SSP2-BT drop-in. The HiFi UCM is left in place because it belongs
+to the package, not to this module. Initramfs images are regenerated with the
+stock kernel driver restored.
 
 ## Known limitations
 
@@ -139,13 +152,13 @@ package, not to this module.
 
 ## Upstream tracking
 
-The two big pieces are now upstream:
+Two userspace pieces are now upstream:
 
 - **UCM:** shipped in `alsa-ucm-conf 1.2.16` (combined `cs42l43-spk+cs35l56`
   codec dir + `sof-soundwire` `-spk` regex + the speaker confs). ✅
 - **Firmware:** shipped in `linux-firmware-cirrus >= 20260519` for `1043:15e4`. ✅
 
-On a fully up-to-date system the only thing this module still adds is the
-`52-disable-bt-sco-offload.conf` WirePlumber drop-in that silences the dead
-`SSP2-BT` topology node. Once that unused PCM is dropped from the SOF topology
-upstream, the module becomes fully redundant and can be uninstalled.
+The B9406CAA ghost-RT722 DMI quirk is not yet present in released kernels, so
+the DKMS overlay remains necessary even on a fully up-to-date system. The
+module also keeps the `52-disable-bt-sco-offload.conf` drop-in until that unused
+PCM is removed from the SOF topology upstream.

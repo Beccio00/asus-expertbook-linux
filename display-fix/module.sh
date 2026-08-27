@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # display-fix module manifest.
 #
 # ASUS ExpertBook Ultra (B9406CAA) Panther Lake iGPU + xe driver hangs the
@@ -8,12 +9,15 @@
 #   kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver
 # and the internal panel goes black until reboot.
 #
-# Fix: disable PSR / Panel Replay on xe via kernel cmdline. modprobe.d
+# Fix: disable PSR / Panel Replay and force the panel's VESA DPCD backlight
+# interface (`xe.enable_dpcd_backlight=2`) via kernel cmdline. The latter fixes
+# the B9406CAA case where sysfs brightness changes but panel luminance does not.
+# modprobe.d
 # alone is NOT enough on this distro — xe loads from initramfs before
 # /etc/modprobe.d is honoured, so the params have to land on the kernel
-# cmdline. We manage that by appending a marked block to
-# /etc/default/limine (the source-of-truth that limine-entry-tool reads)
-# and regenerating /boot/limine.conf.
+# cmdline. We install a managed `limine-entry-tool` drop-in and regenerate the
+# Limine entries. This is the CachyOS source of truth; `/etc/default/limine`
+# is not used by current limine-mkinitcpio-hook releases.
 #
 # We still drop the modprobe.d file as belt-and-suspenders for any future
 # scenario where xe is rmmod'd and re-loaded post-boot.
@@ -27,102 +31,81 @@
 # workaround below is therefore still required on every current kernel.
 
 MODULE_NAME="display-fix"
-MODULE_DESC="ASUS ExpertBook Ultra (B9406CAA) xe driver Panel Replay PSR lockup workaround"
-MODULE_VERSION="1.1.2"
+MODULE_DESC="B9406CAA xe: stable panel plus working DPCD brightness control"
+MODULE_VERSION="1.2.0"
 
 MODULE_FILES=(
   "xe-disable-psr.conf:/etc/modprobe.d/xe-disable-psr.conf"
+  "limine-display.conf:/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf"
 )
 
-readonly _DF_LIMINE_CONF="/etc/default/limine"
-readonly _DF_BEGIN="# >>> asus-expertbook-linux display-fix >>>"
-readonly _DF_END="# <<< asus-expertbook-linux display-fix <<<"
-readonly _DF_CMDLINE='KERNEL_CMDLINE[default]+=" xe.enable_psr=0 xe.enable_psr2_sel_fetch=0 xe.enable_panel_replay=0"'
+_df_remove_legacy_block() {
+  local legacy="/etc/default/limine"
+  local begin="# >>> asus-expertbook-linux display-fix >>>"
+  local end="# <<< asus-expertbook-linux display-fix <<<"
 
-_df_block_present() {
-  [[ -f "$_DF_LIMINE_CONF" ]] && grep -qF "$_DF_BEGIN" "$_DF_LIMINE_CONF"
-}
-
-_df_append_block() {
-  if [[ ! -f "$_DF_LIMINE_CONF" ]]; then
-    echo "  warn: $_DF_LIMINE_CONF missing — skipping cmdline injection"
-    return 0
+  if [[ -f $legacy ]] && grep -qF "$begin" "$legacy" && \
+     grep -qF "$end" "$legacy"; then
+    sed -i "/^${begin}$/,/^${end}$/d" "$legacy"
+    log "[display-fix] removed the obsolete managed block from $legacy"
   fi
-  if _df_block_present; then
-    echo "  cmdline marker already present in $_DF_LIMINE_CONF"
-    return 0
-  fi
-  {
-    printf '\n%s\n' "$_DF_BEGIN"
-    printf '%s\n'   "$_DF_CMDLINE"
-    printf '%s\n'   "$_DF_END"
-  } >> "$_DF_LIMINE_CONF"
-  echo "  appended cmdline marker to $_DF_LIMINE_CONF"
-}
-
-_df_remove_block() {
-  if [[ ! -f "$_DF_LIMINE_CONF" ]] || ! _df_block_present; then
-    return 0
-  fi
-  local tmp
-  tmp="$(mktemp)"
-  awk -v b="$_DF_BEGIN" -v e="$_DF_END" '
-    BEGIN { skip=0; pending_blank="" }
-    {
-      if ($0 == b) { skip=1; next }
-      if ($0 == e) { skip=0; next }
-      if (skip) next
-      if ($0 == "") { pending_blank = pending_blank ORS; next }
-      else { printf "%s", pending_blank; pending_blank = ""; print }
-    }
-    END { printf "%s", pending_blank }
-  ' "$_DF_LIMINE_CONF" > "$tmp"
-  install -m 0644 "$tmp" "$_DF_LIMINE_CONF"
-  rm -f "$tmp"
-  echo "  removed cmdline marker from $_DF_LIMINE_CONF"
 }
 
 _df_regen_limine() {
-  # limine-update is the right command on CachyOS / limine-mkinitcpio-hook;
-  # it sources /etc/default/limine and rewrites /boot/limine.conf.
-  # (limine-entry-tool only does single add/remove ops.)
   if command -v limine-update >/dev/null 2>&1; then
-    echo "  regenerating /boot/limine.conf via limine-update"
-    if ! limine-update >/dev/null 2>&1; then
-      echo "  warn: limine-update exited non-zero — running mkinitcpio -P as fallback"
-      mkinitcpio -P >/dev/null 2>&1 || true
-    fi
-  elif command -v mkinitcpio >/dev/null 2>&1; then
-    echo "  limine-update not found — running mkinitcpio -P (triggers limine hook)"
-    mkinitcpio -P >/dev/null 2>&1 || true
+    log "[display-fix] regenerating Limine entries"
+    limine-update
+  elif command -v limine-mkinitcpio >/dev/null 2>&1; then
+    log "[display-fix] regenerating Limine initramfs entries"
+    limine-mkinitcpio
   else
-    echo "  warn: neither limine-update nor mkinitcpio found — /boot/limine.conf NOT regenerated"
+    die "[display-fix] Limine tooling not found; kernel parameters were not activated"
   fi
 }
 
 module_post_install() {
-  _df_append_block
+  _df_remove_legacy_block
   _df_regen_limine
   echo
-  echo "Reboot to apply: xe will load with PSR disabled on every kernel entry."
+  echo "Reboot to apply: xe will load with PSR disabled and VESA DPCD backlight forced."
 }
 
 module_post_uninstall() {
-  _df_remove_block
+  _df_remove_legacy_block
   _df_regen_limine
   echo
   echo "Reboot to revert: PSR will be re-enabled and the lockup may recur."
 }
 
 module_status_extra() {
+  local backlight_value="" token
+
   if grep -q 'xe\.enable_psr=0' /proc/cmdline 2>/dev/null; then
     printf '  cmdline: %sxe.enable_psr=0 active in current boot%s\n' "$c_ok" "$c_off"
   else
-    if _df_block_present 2>/dev/null; then
-      printf '  cmdline: %smarker present in %s — reboot to apply%s\n' "$c_warn" "$_DF_LIMINE_CONF" "$c_off"
+    if [[ -f /etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf ]]; then
+      printf '  cmdline: %sLimine drop-in installed — reboot to apply%s\n' "$c_warn" "$c_off"
     else
       printf '  cmdline: %sxe.enable_psr not on kernel cmdline%s\n' "$c_warn" "$c_off"
     fi
+  fi
+
+  while IFS= read -r token; do
+    if [[ $token == xe.enable_dpcd_backlight=* ]]; then
+      backlight_value="${token#*=}"
+    fi
+  done < <(tr ' ' '\n' </proc/cmdline 2>/dev/null)
+
+  if [[ $backlight_value == 2 ]]; then
+    printf '  backlight:%s xe.enable_dpcd_backlight=2 active (forced VESA interface)%s\n' \
+      "$c_ok" "$c_off"
+  elif [[ -n $backlight_value ]]; then
+    printf '  backlight:%s effective xe.enable_dpcd_backlight=%s (expected 2)%s\n' \
+      "$c_warn" "$backlight_value" "$c_off"
+  elif [[ -f /etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf ]]; then
+    printf '  backlight:%s DPCD fix staged — reboot to apply%s\n' "$c_warn" "$c_off"
+  else
+    printf '  backlight:%s xe.enable_dpcd_backlight=2 is not active%s\n' "$c_warn" "$c_off"
   fi
 
   if [[ -r /sys/kernel/debug/dri/0/i915_edp_psr_status ]]; then

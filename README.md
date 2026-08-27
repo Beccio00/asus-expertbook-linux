@@ -3,13 +3,14 @@
 # asus-expertbook-linux
 
 **Linux compatibility patches for the 2026 ASUS ExpertBook Ultra (B9406CAA)** —
-packaged as a tracked, versioned, reversible patcher.
+tracked and versioned, with reversible configuration modules plus an explicitly
+confirmed camera-firmware capsule update.
 
 [![GitHub Pages](https://img.shields.io/badge/site-burakgon.github.io-7dd3fc?style=flat-square)](https://burakgon.github.io/asus-expertbook-linux/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-c4b5fd?style=flat-square)](LICENSE)
 [![Linux 6.18+](https://img.shields.io/badge/linux-6.18%2B-86efac?style=flat-square)](#kernel--distro-compatibility)
 [![Hardware](https://img.shields.io/badge/hardware-B9406CAA-fbbf24?style=flat-square)](#is-this-repo-for-me)
-[![No kernel patches required](https://img.shields.io/badge/kernel%20patches-not%20required-86efac?style=flat-square)](#how-it-works)
+[![No kernel rebuild required](https://img.shields.io/badge/kernel%20rebuild-not%20required-86efac?style=flat-square)](#how-it-works)
 
 [**🌐 Documentation site**](https://burakgon.github.io/asus-expertbook-linux/) ·
 [**Quick install**](#quick-install) ·
@@ -49,11 +50,12 @@ different distro, the modules themselves still apply — only the
 | Hardware | Symptom out of the box | After installing | Module |
 |---|---|---|---|
 | **PixArt I²C-HID** haptic touchpad `093A:4F05` (ACPI `ASCP1D80`) | **Touchpad doesn't move the cursor.** Kernel log spams `kernel bug: Touch jump detected and discarded.` libinput rejects every event. | Cursor responds to light touches like any normal laptop. Zero "Touch jump" lines. | [`touchpad-fix`](touchpad-fix/) |
-| **Cirrus CS42L43** codec + 2× **CS35L56** speaker amps (PCI subsystem `1043:15e4`) | **Speakers are completely silent.** dmesg: `cs35l56: FIRMWARE_MISSING`, `Calibration disabled`. F1 mute LED stuck on. | Speakers play at any volume. dmesg: `Calibration applied`, `Tuning PID: 0x23134`. | [`audio-fix`](audio-fix/) |
+| **Cirrus CS42L43** codec + 2× **CS35L56** speaker amps (PCI subsystem `1043:15e4`) | **Dummy Output / silent speakers.** A ghost RT722 can abort ALSA card registration; older userspace also lacks tuning/UCM. | B9406CAA-only DKMS filter survives kernel updates; HiFi speaker/headphone/mic routing and calibrated amps work. | [`audio-fix`](audio-fix/) |
 | **Intel Wi-Fi 7 BE211** Panther Lake CNVi (`8086:e440`) | **Wi-Fi 7 (802.11be / EHT) is unstable.** EHT RX collapses to MCS0/NSS1, MLO sessions tear down, `missed beacons` spam, occasional `Microcode SW error` freezes. | EHT disabled (`disable_11be=Y`) → rock-solid **Wi-Fi 6 / HE** fallback (6 GHz, 160 MHz, ~2.1 Gbit/s verified). Zero beacon spam, no freezes. | [`wifi-fix`](wifi-fix/) |
-| **Samsung Display Corp** eDP panel + Intel **`xe`** driver (Xe3 Panther Lake iGPU) | **Internal panel goes black.** `kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver`. eDP-1 wedges, only reboot recovers. | Internal display stable indefinitely. PSR / Panel Replay disabled cleanly at boot. | [`display-fix`](display-fix/) |
+| **Samsung Display Corp** eDP panel + Intel **`xe`** driver (Xe3 Panther Lake iGPU) | **Internal panel goes black or brightness changes do nothing.** `kwin_wayland: Pageflip timed out!`; the eDP engine can wedge until reboot. | PSR / Panel Replay disabled; forced VESA DPCD backlight makes KDE/sysfs brightness change panel luminance. | [`display-fix`](display-fix/) |
 | **Intel Core Ultra X7/X9** Panther Lake hybrid (P + E + LP-E cores) | **Idle power 4–5 W**, fans audible at idle, P-cores never deep-sleep. | Idle ≈ 2–2.5 W. Workload parks on a single LP-E core. P-cores reach `C10`. | [`intel-perf-fix`](intel-perf-fix/) |
 | **USB UVC webcam** (+ idle Panther Lake NPU) | **No AI camera effects.** Windows Studio Effects (background blur, smart framing) doesn't exist on Linux out of the box. | **CPU** background blur via OBS + `obs-backgroundremoval`, exposed as a virtual camera ("AI Camera"). *(NPU offload is not available in the OBS plugin on Linux — see the module's reality-check note.)* | [`webcam-ai-fix`](webcam-ai-fix/) |
+| **Shinetech USB camera + UEFI ESRT target** | ASUS camera firmware 3009 is distributed as a Windows EXE. | Compares locally against the fixed, verified 3009 baseline; offers a confirmed `fwupd` capsule update without running Windows or querying ASUS for newer versions. | [`camera-firmware`](camera-firmware/) |
 | **ASUS BIOS `SLKB` ACPI method** (BIOS `B9406CAA.304`) | **KDE keyboard-backlight slider does nothing** — but the **Fn hotkeys still work** (the backlight is not dead). `SLKB` clamps OS-initiated `0..3` writes to `Local0 = Zero`, so KDE / `brightnessctl` / sysfs writes silently no-op. | *(optional)* KDE slider works: `asusd` translates kernel writes into the OEM-tested `0x100..0x103` range. | [`keyboard-backlight-fix`](keyboard-backlight-fix/) |
 
 > **Nothing this repo installs is a band-aid in the bad sense.** Every module
@@ -78,7 +80,7 @@ After reboot:
 ./patch.sh status
 ```
 
-You should see all seven modules `up to date` and their runtime checks green.
+You should see all eight modules `up to date` (or not applicable) and their runtime checks green.
 
 ### Or pick à la carte
 
@@ -101,15 +103,16 @@ typing single letters. Numbered table, color-coded state, cached.
 ```
 === asus_expertboot_linux patcher ===
 
-  #   Module                  Version  Installed State          Description
-  ----------------------------------------------------------------------------------
-  1   audio-fix               2.1.1    2.1.1     up to date     Speakers + mics + clean panel
-  2   display-fix             1.1.2    1.1.2     up to date     xe Panel Replay / PSR lockup
-  3   intel-perf-fix          1.1.0    1.1.0     up to date     thermald + intel-lpmd
-  4   keyboard-backlight-fix  1.1.0    1.1.0     up to date     (optional) KDE backlight slider
-  5   touchpad-fix            1.1.1    1.1.1     up to date     PixArt 093A:4F05 pressure quirk
-  6   webcam-ai-fix           1.1.0    1.1.0     up to date     OBS CPU background blur
-  7   wifi-fix                2.0.0    2.0.0     up to date     BE211: disable broken EHT
+  #   Module                    Version  Installed State          Description
+  ------------------------------------------------------------------------------------
+  1   audio-fix                 3.0.0    3.0.0     up to date     Ghost-RT722 DKMS + HiFi audio
+  2   camera-firmware           3009     3009      up to date     Verified camera UEFI capsule
+  3   display-fix               1.2.0    1.2.0     up to date     Stable panel + DPCD brightness
+  4   intel-perf-fix            1.1.0    1.1.0     up to date     thermald + intel-lpmd
+  5   keyboard-backlight-fix    1.1.0    1.1.0     up to date     (optional) KDE backlight slider
+  6   touchpad-fix              1.1.1    1.1.1     up to date     PixArt 093A:4F05 pressure quirk
+  7   webcam-ai-fix             1.1.0    1.1.0     up to date     OBS CPU background blur
+  8   wifi-fix                  2.0.0    2.0.0     up to date     BE211: disable broken EHT
 
 Actions
   i <num>    install / update module (idempotent — re-runs post hooks)
@@ -160,19 +163,22 @@ is loaded.
 
 ### 2. [`audio-fix`](audio-fix/) — speakers, headphones, mics (HiFi UCM)
 
-<details><summary><b>The bug</b> — firmware, a UCM gap, and topology noise</summary>
+<details><summary><b>The bug</b> — a ghost codec, firmware, a UCM gap, and topology noise</summary>
 
-1. The Cirrus CS35L56 speaker amps need per-OEM tuning firmware. As of
+1. B9406CAA firmware describes an unfitted RT722. Kernels that retain its
+   `UNATTACHED` endpoint create a duplicate `SDW3-Playback-SimpleJack`, abort
+   `sof_sdw` with `-EEXIST`/`-12`, and expose no ALSA card at all.
+2. The Cirrus CS35L56 speaker amps need per-OEM tuning firmware. As of
    `linux-firmware-cirrus >= 20260519` it ships upstream for `1043:15e4`; on
    anything older the amps boot `FIRMWARE_MISSING` and the bundled blobs fill in.
-2. The card reports a **combined** sidecar-amp codec — `spk:cs35l56+cs42l43-spk`
+3. The card reports a **combined** sidecar-amp codec — `spk:cs35l56+cs42l43-spk`
    (or two `spk:` tags on older kernels). Stock `alsa-ucm-conf 1.2.15.x` has no
    UCM dir for it **and** its `SpeakerCodec` regex drops the trailing `-spk`, so
    `alsaucm` fails (`codecs/cs35l56+cs42l43/init.conf: -2`). WirePlumber then
    uses `stereo-fallback`, which plays to the **Jack** PCM (device 0), not the
    **Speaker** PCM (device 2) — silent speakers, even though `aplay -D plughw:0,2`
    works.
-3. The generic SOF topology declares an unused `SSP2-BT` hardware-offload PCM
+4. The generic SOF topology declares an unused `SSP2-BT` hardware-offload PCM
    with no firmware blob; WirePlumber's probe of it spams the kernel log
    (~40% of all kernel errors at boot).
 
@@ -187,7 +193,7 @@ cs35l56 sdw:0:2:01fa:3556:01:0: Tuning PID: 0x23134, SID: 0x470200  ← with
 
 </details>
 
-<details><summary><b>The fix</b> — HiFi UCM + cs35l56 firmware (replaces the old pro-audio pin)</summary>
+<details><summary><b>The fix</b> — persistent DKMS filter + HiFi UCM + cs35l56 firmware</summary>
 
 The proper fix is the upstream **HiFi UCM**, not a profile hack — named ports,
 headphone-jack **auto-switching**, working volume + mic-mute LED. **It's upstream
@@ -196,11 +202,12 @@ firmware + the SSP2-BT drop-in; the UCM rows below are dropped in **only as a
 fallback on `alsa-ucm-conf < 1.2.16`** (and the `NoExtract` pin is removed
 automatically once the package crosses 1.2.16).
 
-> **If PipeWire shows only “Dummy Output”:** the kernel did not register an
-> ALSA card, so firmware/UCM installation cannot help yet. Check
-> `./patch.sh status audio-fix`; the known `SDW3-Playback-SimpleJack` /
-> `sof_sdw ... error -12` failure requires kernel patch
-> [`0004`](upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch).
+`audio-fix` v3 installs a small B9406CAA-only `snd-soc-sof-sdw` DKMS overlay.
+It discards only an RT722 that the SoundWire core has positively marked
+`UNATTACHED`; real RT722 hardware and every other model are untouched. DKMS
+automatically rebuilds it on kernel updates, and install regenerates the boot
+initramfs. The upstream DMI patch [`0004`](upstream-patches/0004-soundwire-dmi-quirks-Disable-ghost-rt722-on-ASUS-Exp.patch)
+remains the eventual in-kernel replacement.
 
 | File | Path | What it does |
 |---|---|---|
@@ -209,6 +216,7 @@ automatically once the package crosses 1.2.16).
 | `cs35l56+cs42l43-spk.conf`, `cs42l43-spk+cs35l56.conf` | `/usr/share/alsa/ucm2/sof-soundwire/` | The Speaker device for the combined codec — routes playback to `hw:,2` and the CS35L56 + CS42L43 amps. |
 | `cs42l43-spk+cs35l56-init.conf` | `/usr/share/alsa/ucm2/codecs/cs42l43-spk+cs35l56/` | Combined codec init (control remap + LED attach). `module.sh` symlinks `cs35l56+cs42l43-spk` → this so both kernel names resolve. |
 | `52-disable-bt-sco-offload.conf` | `/etc/wireplumber/wireplumber.conf.d/` | Disables the dead `SSP2-BT` offload PCM so its probe stops spamming the log. Bluetooth audio (A2DP/HFP) still works via the PipeWire software path. |
+| `dkms/asus-expertbook-sof-sdw-3.0.0/` | `/usr/src/` + `/lib/modules/*/updates/dkms/` | Filters the unfitted, `UNATTACHED` RT722 before DAI-link creation; rebuilt automatically for new kernels. |
 
 > The **F1 speaker-mute LED can't be fixed from Linux** — this laptop exposes no
 > speaker-mute LED device, only `platform::micmute` (which the HiFi UCM drives).
@@ -259,7 +267,7 @@ silicon. `iwlwifi.bt_coex_active=Y` is left alone, so Bluetooth keeps working.
 
 </details>
 
-### 4. [`display-fix`](display-fix/) — internal panel doesn't lock up
+### 4. [`display-fix`](display-fix/) — stable panel and working brightness
 
 <details><summary><b>The bug</b> — xe driver hangs Panel Replay handshake</summary>
 
@@ -286,12 +294,12 @@ and is **not** cured by disabling PSR.
 
 </details>
 
-<details><summary><b>The fix</b> — xe.enable_psr=0 on the kernel cmdline</summary>
+<details><summary><b>The fix</b> — disable broken self-refresh and force VESA DPCD backlight</summary>
 
 | File | Path | What it does |
 |---|---|---|
-| `xe-disable-psr.conf` | `/etc/modprobe.d/` | Belt-and-suspenders for late module load. |
-| (managed block) | `/etc/default/limine` | Appends `xe.enable_psr=0 xe.enable_psr2_sel_fetch=0 xe.enable_panel_replay=0` to the kernel cmdline. The post-install hook calls `limine-update` so the new params land in every kernel entry of `/boot/limine.conf`. Uninstall removes the block cleanly. |
+| `xe-disable-psr.conf` | `/etc/modprobe.d/` | Belt-and-suspenders for late module load; also forces `enable_dpcd_backlight=2`. |
+| `limine-display.conf` | `/etc/limine-entry-tool.d/90-asus-expertbook-linux-display.conf` | Adds `xe.enable_psr=0 xe.enable_psr2_sel_fetch=0 xe.enable_panel_replay=0 xe.enable_dpcd_backlight=2` to every Limine kernel entry. Value `2` forces the VESA AUX/DPCD interface when sysfs brightness otherwise changes without changing panel luminance. |
 
 This is **structurally identical to the per-device entry** the upstream
 `drm-intel-next` branch is growing for Dell XPS 14/16. Our
@@ -435,6 +443,23 @@ the EC correctly.
 
 </details>
 
+### 8. [`camera-firmware`](camera-firmware/) — verified 3009 update without Windows
+
+The ASUS camera updater is a Windows EXE, but its payload is a signed UEFI
+capsule. This module reads the camera ESRT GUID locally and compares it only to
+the verified **3009 / 10.1.2.3009** baseline (`raw 479569`). It performs no
+online latest-version lookup.
+
+If the installed value is older or missing, `./patch.sh install
+camera-firmware` displays both versions and asks before doing anything. After
+confirmation it uses a matching local EXE or downloads the single fixed ASUS
+3009 artifact, verifies the pinned EXE and capsule SHA-256 values, and stages
+the capsule with `fwupd`. The Windows program is never executed. A reboot with
+AC connected applies it; current/equal/newer firmware is never reflashed.
+
+See [`camera-firmware/README.md`](camera-firmware/README.md) for the hashes,
+ESRT GUID and local-package paths.
+
 ## How it works
 
 The whole project is a small bash module manager (`patch.sh`, ~500 lines)
@@ -448,6 +473,7 @@ asus-expertbook-linux/
 │   ├── module.sh               # manifest: files + hooks + status check
 │   ├── README.md
 │   └── …                       # payload files
+├── camera-firmware/            # verified ASUS 3009 capsule staging
 ├── display-fix/  …
 ├── intel-perf-fix/  …
 ├── keyboard-backlight-fix/  …
@@ -461,8 +487,8 @@ asus-expertbook-linux/
     └── check-hardware.sh       # one-shot compatibility check
 ```
 
-A module's manifest declares files (source → destination), an optional
-post-install hook, an optional status-check function, and a version. The
+A module's manifest declares files (source → destination), optional custom
+install/state hooks, post-install/runtime checks, and a version. The
 patcher records the installed version under
 `/var/lib/asus_expertboot_patcher/<module>.version` so subsequent
 operations know whether each module is `up to date`, `update available`,
@@ -477,9 +503,9 @@ operations know whether each module is `up to date`, `update available`,
 | `./patch.sh update [module…]` | Alias for install. |
 | `./patch.sh uninstall [module…]` | Remove files + run uninstall hook. |
 | `./patch.sh diff [module…]` | Show what would change before installing. |
-| `./patch.sh install-all` | Install every discoverable module. |
+| `./patch.sh install-all` | Install every discoverable module; camera firmware is only offered when older and still asks for confirmation. |
 | `./patch.sh update-all` | Re-install only modules that aren't `up to date`. |
-| `./patch.sh uninstall-all` | Tear down everything cleanly. |
+| `./patch.sh uninstall-all` | Tear down installed configuration modules; applied device firmware is not downgraded. |
 
 ## Kernel & distro compatibility
 
@@ -487,17 +513,18 @@ operations know whether each module is `up to date`, `update available`,
   Wi-Fi 7 op-mode, the `xe` driver Panther Lake bringup, and the
   `cs35l56` driver. Anything older won't even probe most of this
   hardware.
-- **Tested on:** `linux-cachyos 7.0.x`, `linux-cachyos-rc` through `7.1-rc7`
-  (the `display-fix` PSR hang persists on all of them). Should work on
-  `linux-lts 6.18.x` and `linux 7.0.x` Arch builds.
+- **Tested on:** the audio DKMS overlay compiles against
+  `linux-cachyos-lts 6.18.42`, `linux-cachyos 7.2.0`, and
+  `linux-cachyos-rc 7.2.0-rc7`. Matching kernel headers are required; the
+  normal Arch/CachyOS DKMS hooks rebuild it before boot images on upgrades.
 - **Distros:** Arch and Arch derivatives (CachyOS, EndeavourOS, Manjaro)
   all use the same `/etc/udev/hwdb.d`, `/etc/libinput`,
   `/etc/modprobe.d`, `/etc/wireplumber/wireplumber.conf.d` paths the
   modules write to.
 - **Bootloader assumption (display-fix):** `limine` via
-  `limine-mkinitcpio-hook`, where `/etc/default/limine` is the source of
-  truth. If you use systemd-boot or GRUB, the module's cmdline-injection
-  hook needs swapping; the modprobe.d half still works.
+  `limine-mkinitcpio-hook`, where `/etc/limine-entry-tool.d/` drop-ins are the
+  source of truth. If you use systemd-boot or GRUB, the module's
+  cmdline-injection hook needs swapping; the modprobe.d half still works.
 
 ## Adding a new module or model
 
@@ -526,16 +553,17 @@ needed.
 
 ## Upstream submissions
 
-The [`upstream-patches/`](upstream-patches/) folder ships three patches
+The [`upstream-patches/`](upstream-patches/) folder ships four patches
 that turn each module into a permanent upstream entry:
 
 | # | Tree | Replaces |
 |---|---|---|
-| `0001` | `drivers/gpu/drm/i915/display/intel_quirks.c` | `display-fix`'s cmdline workaround |
+| `0001` | `drivers/gpu/drm/i915/display/intel_quirks.c` | `display-fix`'s PSR / Panel Replay cmdline flags |
 | `0002` | `sound/soc/intel/boards/sof_sdw.c` | most of `audio-fix` (combined-codec UCM routing) |
 | `0003` | `libinput/quirks/30-vendor-pixart.quirks` | `touchpad-fix`'s libinput override |
+| `0004` | `drivers/soundwire/dmi-quirks.c` | `audio-fix`'s ghost-RT722 DKMS workaround |
 
-All three dry-run apply cleanly against current `torvalds/linux` master /
+See the tracking notes for current applicability against `torvalds/linux` /
 `drm-intel-next` / libinput main. See
 [`upstream-patches/README.md`](upstream-patches/README.md) for hardware
 identifiers, mailing list addresses, and submission instructions.
@@ -555,12 +583,22 @@ their original Cirrus Logic redistribution license. See [NOTICE](NOTICE).
 Most of it transfers. The `audio-fix` firmware blobs are matched on PCI
 subsystem `1043:15e4` (this exact laptop). Sibling subsystems
 `104315d4` and `104315f4` ship different per-OEM tuning files in
-upstream `linux-firmware`. The `touchpad-fix`, `wifi-fix`,
+upstream `linux-firmware`. The camera capsule is strictly B9406CAA-only. The
+`touchpad-fix`, `wifi-fix`,
 `display-fix`, `intel-perf-fix`, `webcam-ai-fix`, and
 `keyboard-backlight-fix` modules are hardware-agnostic or match by
 family-level identifiers and apply more broadly.
 
 PRs adding `module.sh` entries for sibling models are welcome.
+
+</details>
+
+<details><summary><b>Does the fingerprint reader work?</b></summary>
+
+Yes. The FocalTech FT9349 (`2808:a97a`) is supported by upstream
+`libfprint 1.94.100` and later. Install the normal `libfprint` + `fprintd`
+packages, then enroll with `fprintd-enroll`. No out-of-tree patch is needed on
+current Arch/CachyOS.
 
 </details>
 
@@ -597,10 +635,11 @@ missing-device limitation, not a profile issue.
 That's the goal — see [`upstream-patches/`](upstream-patches/). Two of the
 audio pieces already landed: `alsa-ucm-conf 1.2.16` ships the
 `cs42l43-spk+cs35l56` codec dir and `linux-firmware-cirrus >= 20260519`
-ships the OEM blobs, so on an up-to-date system `audio-fix` is already down
-to a single topology-noise drop-in. As the kernel/quirk patches in
-`upstream-patches/` land and your distro picks them up, every module here
-becomes deletable.
+ships the OEM blobs. The ghost-RT722 kernel quirk has not landed for this DMI,
+so `audio-fix` still carries its persistent DKMS overlay plus the topology-noise
+drop-in. As the kernel/quirk patches in `upstream-patches/` land and your
+distro picks them up, those local workarounds become deletable; the camera
+module remains a safe bridge for ASUS's Windows-packaged firmware capsule.
 
 </details>
 

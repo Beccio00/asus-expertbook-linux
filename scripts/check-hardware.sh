@@ -93,7 +93,47 @@ elif lsmod | grep -q '^iwlmvm'; then
 fi
 echo
 
-# 6) Distro
+# 6) Fingerprint reader
+printf '%sFingerprint%s\n' "$c_bold" "$c_off"
+fingerprint=""
+if command -v lsusb >/dev/null 2>&1; then
+  fingerprint="$(lsusb 2>/dev/null | grep -i '2808:a97a' | head -1)"
+fi
+if [[ -n $fingerprint ]]; then
+  ok "FocalTech FT9349 (2808:a97a) — supported by upstream libfprint 1.94.100+"
+  if command -v pacman >/dev/null 2>&1; then
+    fp_version="$(pacman -Q libfprint 2>/dev/null | awk '{print $2}')"
+    fp_version="${fp_version%%-*}"
+    if [[ -n $fp_version ]] && \
+       [[ $(printf '%s\n%s\n' 1.94.100 "$fp_version" | sort -V | head -1) == 1.94.100 ]]; then
+      ok "libfprint $fp_version installed — no custom Git package required"
+    else
+      warn "install/update the normal libfprint + fprintd packages (need libfprint 1.94.100+)"
+    fi
+  fi
+else
+  note "FocalTech 2808:a97a not detected"
+fi
+echo
+
+# 7) Camera UEFI firmware
+printf '%sCamera firmware%s\n' "$c_bold" "$c_off"
+camera_raw=""
+if command -v fwupdmgr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  camera_raw="$(fwupdmgr get-devices --json 2>/dev/null | jq -r \
+    'first(.Devices[] | select((.Guid // []) | index("d9d10946-36c2-3bcb-bffc-fcda56025390")) | (.VersionRaw // .Version // 0)) // 0' \
+    2>/dev/null || true)"
+fi
+if [[ $camera_raw =~ ^[0-9]+$ ]] && (( camera_raw >= 479569 )); then
+  ok "ASUS 3009 / 10.1.2.3009 baseline satisfied (ESRT raw $camera_raw)"
+elif [[ $camera_raw =~ ^[0-9]+$ ]] && (( camera_raw > 0 )); then
+  warn "ESRT raw $camera_raw is below verified 3009 baseline 479569 — camera-firmware will offer the update"
+else
+  note "version not available without fwupd + jq; run ./patch.sh status camera-firmware"
+fi
+echo
+
+# 8) Distro
 printf '%sDistro%s\n' "$c_bold" "$c_off"
 if [[ -f /etc/arch-release ]]; then
   ok "Arch (or derivative) — patcher's pacman + paths assumed correct"
