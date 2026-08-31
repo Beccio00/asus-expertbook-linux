@@ -88,10 +88,11 @@ module_post_uninstall() {
 }
 
 module_status_extra() {
-  local backlight_value="" token
+  local backlight_value=""
 
-  if grep -Eq '(^| )(xe\.enable_psr=0|xe\.enable_psr2_sel_fetch=0|xe\.enable_panel_replay=0)( |$)' \
-      /proc/cmdline 2>/dev/null; then
+  if cmdline_active xe.enable_psr=0 || \
+     cmdline_active xe.enable_psr2_sel_fetch=0 || \
+     cmdline_active xe.enable_panel_replay=0; then
     printf '  self-refresh:%s legacy =0 override active in this boot — reboot to use kernel defaults%s\n' \
       "$c_warn" "$c_off"
   else
@@ -99,11 +100,7 @@ module_status_extra() {
       "$c_ok" "$c_off"
   fi
 
-  while IFS= read -r token; do
-    if [[ $token == xe.enable_dpcd_backlight=* ]]; then
-      backlight_value="${token#*=}"
-    fi
-  done < <(tr ' ' '\n' </proc/cmdline 2>/dev/null)
+  backlight_value="$(cmdline_active_value xe.enable_dpcd_backlight)"
 
   if [[ $backlight_value == 2 ]]; then
     printf '  backlight:%s xe.enable_dpcd_backlight=2 active (forced VESA interface)%s\n' \

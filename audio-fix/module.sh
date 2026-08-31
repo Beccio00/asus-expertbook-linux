@@ -80,16 +80,10 @@ UCM_FILES=(
 )
 
 # ucm_hifi_is_upstream: true when the installed alsa-ucm-conf already ships the
-# combined cs35l56+cs42l43-spk HiFi UCM (>= 1.2.16). On non-pacman systems we
-# can't tell, so we return false and install the bundled copies.
+# combined cs35l56+cs42l43-spk HiFi UCM (>= 1.2.16). Falls back to false when
+# the version cannot be determined, and we install the bundled copies.
 ucm_hifi_is_upstream() {
-  command -v pacman >/dev/null 2>&1 || return 1
-  local v lowest
-  v="$(pacman -Q alsa-ucm-conf 2>/dev/null | awk '{print $2}')"
-  v="${v%%-*}"
-  [[ -n $v ]] || return 1
-  lowest="$(printf '%s\n%s\n' "1.2.16" "$v" | sort -V | sed -n '1p')"
-  [[ $lowest == 1.2.16 ]]
+  pkg_atleast alsa-ucm-conf 1.2.16
 }
 
 # audio_kernel_has_upstream_ghost_quirk [kernel-release]
@@ -170,34 +164,23 @@ audio_remove_legacy_dkms() {
 }
 
 audio_require_build_tools() {
-  local missing=() package
-  for package in dkms make clang; do
-    command -v "$package" >/dev/null 2>&1 || missing+=("$package")
+  local missing=() tool
+  for tool in dkms make clang; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
 
   if (( ${#missing[@]} > 0 )); then
-    if command -v pacman >/dev/null 2>&1; then
-      log "[audio-fix] installing required build tools: ${missing[*]}"
-      pacman -S --needed --noconfirm "${missing[@]}"
-    else
-      die "[audio-fix] missing build tools: ${missing[*]}"
-    fi
+    log "[audio-fix] installing required build tools: ${missing[*]}"
+    pkg_install "${missing[@]}" || die "[audio-fix] missing build tools: ${missing[*]}"
   fi
 
-  if [[ ! -e /lib/modules/$(uname -r)/build/Makefile ]]; then
-    if command -v pacman >/dev/null 2>&1 && \
-       [[ -r /lib/modules/$(uname -r)/pkgbase ]]; then
-      package="$(<"/lib/modules/$(uname -r)/pkgbase")-headers"
-      log "[audio-fix] installing running-kernel headers: $package"
-      pacman -S --needed --noconfirm "$package"
-    else
-      die "[audio-fix] kernel headers missing for $(uname -r)"
-    fi
-  fi
+  kernel_headers_present || \
+    kernel_headers_install || \
+    die "[audio-fix] kernel headers missing for $(uname -r)"
 }
 
 audio_install_dkms() {
-  local kernel kernel_dir installed=0 needed=0
+  local kernel installed=0 needed=0
   local -a build_kernels=()
 
   [[ -f $AUDIO_DKMS_SOURCE/dkms.conf ]] || \
@@ -220,21 +203,19 @@ audio_install_dkms() {
 
   rm -rf -- "$AUDIO_DKMS_TARGET"
 
-  for kernel_dir in /usr/lib/modules/*; do
-    [[ -d $kernel_dir ]] || continue
-    kernel="${kernel_dir##*/}"
+  while IFS= read -r kernel; do
     if audio_kernel_has_upstream_ghost_quirk "$kernel"; then
       log "[audio-fix] $kernel contains upstream B9406CAA ghost-RT722 quirk; DKMS not needed"
       continue
     fi
 
     needed=$(( needed + 1 ))
-    if [[ ! -e $kernel_dir/build/Makefile ]]; then
+    if ! kernel_headers_present "$kernel"; then
       warn "[audio-fix] skipping $kernel: upstream quirk absent and matching headers are not installed"
       continue
     fi
     build_kernels+=("$kernel")
-  done
+  done < <(kernel_list)
 
   if (( needed == 0 )); then
     log "[audio-fix] every installed kernel contains the upstream DMI quirk; removed redundant DKMS overlay"
@@ -265,13 +246,7 @@ audio_refresh_initramfs() {
   local reason="${1:-after the audio driver change}"
   # sof_sdw may be included in an autodetected initramfs. Rebuild it now so the
   # selected stock/DKMS copy is consistent at the next boot.
-  if command -v limine-mkinitcpio >/dev/null 2>&1; then
-    log "[audio-fix] rebuilding Limine initramfs entries $reason"
-    limine-mkinitcpio
-  elif command -v mkinitcpio >/dev/null 2>&1; then
-    log "[audio-fix] rebuilding initramfs images $reason"
-    mkinitcpio -P
-  fi
+  initramfs_regen "$reason"
 }
 
 audio_remove_dkms() {
@@ -289,11 +264,12 @@ module_post_install() {
   audio_install_dkms
 
   if ucm_hifi_is_upstream; then
-    local v; v="$(pacman -Q alsa-ucm-conf 2>/dev/null | awk '{print $2}')"
+    local v; v="$(pkg_version alsa-ucm-conf)"
     log "[audio-fix] alsa-ucm-conf ${v} ships the cs35l56+cs42l43-spk HiFi UCM upstream -- not installing bundled UCM (firmware-only)."
     # If an older version of this module pinned sof-soundwire.conf via NoExtract,
     # drop the pin so the packaged file tracks future upgrades normally.
-    if grep -q "ucm2/sof-soundwire/sof-soundwire.conf" /etc/pacman.conf 2>/dev/null; then
+    if [[ $(pkg_manager) == pacman ]] && \
+       grep -q "ucm2/sof-soundwire/sof-soundwire.conf" /etc/pacman.conf 2>/dev/null; then
       sed -i '\#ucm2/sof-soundwire/sof-soundwire.conf#d' /etc/pacman.conf
       log "[audio-fix] removed obsolete sof-soundwire.conf NoExtract pin from /etc/pacman.conf"
     fi
@@ -312,7 +288,10 @@ module_post_install() {
     # Pin our sof-soundwire.conf so an alsa-ucm-conf upgrade doesn't revert the
     # SpeakerCodec regex fix. (Re-running this module after the upgrade crosses
     # 1.2.16 drops the pin automatically.)
-    if ! grep -q "ucm2/sof-soundwire/sof-soundwire.conf" /etc/pacman.conf; then
+    # NoExtract is a pacman feature; the Debian analogue is dpkg-divert and is
+    # deliberately not wired up yet.
+    if [[ $(pkg_manager) == pacman ]] && \
+       ! grep -q "ucm2/sof-soundwire/sof-soundwire.conf" /etc/pacman.conf; then
       sed -i '/^#NoExtract/a NoExtract   = usr/share/alsa/ucm2/sof-soundwire/sof-soundwire.conf' /etc/pacman.conf
     fi
   fi
@@ -334,7 +313,9 @@ module_post_uninstall() {
       rm -f -- "$dst"
     done
     rm -f /usr/share/alsa/ucm2/codecs/cs35l56+cs42l43-spk
-    sed -i '\#ucm2/sof-soundwire/sof-soundwire.conf#d' /etc/pacman.conf 2>/dev/null || true
+    if [[ $(pkg_manager) == pacman ]]; then
+      sed -i '\#ucm2/sof-soundwire/sof-soundwire.conf#d' /etc/pacman.conf 2>/dev/null || true
+    fi
     echo "Reboot to revert. Speakers go silent again until upstream alsa-ucm-conf"
     echo "ships the cs35l56+cs42l43-spk UCM (>= 1.2.16)."
   else
