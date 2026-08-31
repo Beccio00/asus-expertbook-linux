@@ -37,6 +37,17 @@ ok()   { printf '%sOK%s   %s\n' "$c_ok" "$c_off" "$*"; }
 warn() { printf '%sWARN%s %s\n' "$c_warn" "$c_off" "$*"; }
 die()  { printf '%sERR%s  %s\n' "$c_err" "$c_off" "$*" >&2; exit 1; }
 
+# Platform abstraction: package manager, kernel headers, initramfs, bootloader
+# cmdline, services. Sourced before any module is loaded so every module.sh can
+# call these helpers via the `with_module` subshell. lib/ contains no module.sh,
+# so discover_modules never mistakes it for a module.
+if [[ -f "$ROOT_DIR/lib/distro.sh" ]]; then
+  # shellcheck source=lib/distro.sh
+  source "$ROOT_DIR/lib/distro.sh"
+else
+  die "missing $ROOT_DIR/lib/distro.sh"
+fi
+
 usage() {
   sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
