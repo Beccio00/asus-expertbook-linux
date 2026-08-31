@@ -4,16 +4,19 @@
 # tuning that Omarchy 3.5/3.6 enables out of the box, on KDE Plasma + Arch.
 # Specifically:
 #
-#   thermald (extra repo)   Intel thermal management daemon. P/E core throttle
+#   thermald                Intel thermal management daemon. P/E core throttle
 #                           awareness, much better than the kernel's coarse
 #                           default on Panther Lake's hybrid topology.
+#                           Arch: extra. Debian/Ubuntu: main.
 #
-#   intel-lpmd (extra/      Intel Low Power Mode Daemon. When the system is
-#   cachyos repo)           idle, parks all workload on a single LP-E core and
+#   intel-lpmd              Intel Low Power Mode Daemon. When the system is
+#                           idle, parks all workload on a single LP-E core and
 #                           lets the P-cores deep-sleep — biggest single
 #                           idle-power win on PTL hardware. Stock config is
 #                           Mode 0 (Cgroup v2 cpuset): it confines tasks to the
 #                           LP-E cluster rather than offlining the P-cores.
+#                           Arch: extra/cachyos. Ubuntu: universe (24.04+).
+#                           Not in Debian yet, so its absence is tolerated.
 #
 # We deliberately DO NOT touch:
 #   - The Hyprland-only toggles (Omarchy is Hyprland-based; we run KDE Plasma
@@ -26,62 +29,87 @@
 # This module ships no payload files; everything happens in the install hook
 # (package installs + systemd unit enables). Empty MODULE_FILES is intentional
 # and supported by patch.sh (mod_files_state treats empty as "all").
+#
+# Package and service calls go through lib/distro.sh so the same hook works on
+# pacman and apt systems. The unit name is resolved at runtime rather than
+# hardcoded: intel-lpmd ships as intel_lpmd.service on Arch, and the unit name
+# is a packaging decision each distribution makes independently.
 
 MODULE_NAME="intel-perf-fix"
 MODULE_DESC="Panther Lake thermal + power daemons (thermald, intel-lpmd) à la Omarchy"
-MODULE_VERSION="1.1.0"
+MODULE_VERSION="1.2.0"
 
 MODULE_FILES=()
 
 module_post_install() {
-  echo "  installing thermald (extra repo)"
-  pacman -S --needed --noconfirm thermald 2>&1 | tail -3 || true
+  local unit
 
-  echo "  enabling thermald.service"
-  systemctl enable --now thermald.service 2>&1 | tail -1 || true
+  echo "  installing thermald"
+  pkg_install thermald 2>&1 | tail -3 || true
+
+  unit="$(svc_unit thermald.service)"
+  echo "  enabling $unit"
+  svc_enable_now "$unit" 2>&1 | tail -1 || true
 
   echo
-  echo "  installing intel-lpmd (extra/cachyos repo)"
-  pacman -S --needed --noconfirm intel-lpmd 2>&1 | tail -3 || true
+  if pkg_installed intel-lpmd || pkg_available intel-lpmd; then
+    echo "  installing intel-lpmd"
+    pkg_install intel-lpmd 2>&1 | tail -3 || true
 
-  echo "  enabling intel_lpmd.service"
-  systemctl enable --now intel_lpmd.service 2>&1 | tail -1 || true
+    unit="$(svc_unit intel_lpmd.service intel-lpmd.service)"
+    echo "  enabling $unit"
+    svc_enable_now "$unit" 2>&1 | tail -1 || true
+  else
+    # Debian has no intel-lpmd package (Ubuntu carries it in universe).
+    # thermald alone still covers the thermal half, so a missing intel-lpmd is
+    # a warning rather than a failure. On Arch this branch is unreachable
+    # unless `pacman -Si intel-lpmd` fails, in which case `pacman -S` would
+    # have failed the same way.
+    warn "intel-lpmd is not available on this distribution; skipping it"
+    echo "  thermald alone still covers the thermal half of this module."
+  fi
 }
 
 module_post_uninstall() {
-  echo "  disabling thermald.service"
-  systemctl disable --now thermald.service 2>/dev/null || true
+  local unit
 
-  if systemctl list-unit-files intel_lpmd.service >/dev/null 2>&1; then
-    systemctl disable --now intel_lpmd.service 2>/dev/null && echo "  disabled intel_lpmd.service"
+  unit="$(svc_unit thermald.service)"
+  echo "  disabling $unit"
+  svc_disable_now "$unit" 2>/dev/null || true
+
+  unit="$(svc_unit intel_lpmd.service intel-lpmd.service)"
+  if svc_exists "$unit"; then
+    svc_disable_now "$unit" 2>/dev/null && echo "  disabled $unit"
   fi
 
   echo
   echo "  Packages left installed (so revert is reversible without re-fetching)."
   echo "  Remove fully with:"
-  echo "    sudo pacman -Rns thermald"
-  echo "    sudo pacman -Rns intel-lpmd"
+  echo "    $(pkg_remove_hint thermald)"
+  echo "    $(pkg_remove_hint intel-lpmd)"
 }
 
 module_status_extra() {
-  local s
-  for svc in thermald.service intel_lpmd.service; do
+  local s svc version
+
+  for svc in "$(svc_unit thermald.service)" \
+             "$(svc_unit intel_lpmd.service intel-lpmd.service)"; do
+    # `systemctl is-active` answers "inactive" for a unit that does not exist,
+    # so ask svc_exists instead — the silent case the original code intended.
+    svc_exists "$svc" || continue
     s="$(systemctl is-active "$svc" 2>/dev/null || true)"
     case "$s" in
-      active)        printf '  %-22s %sactive%s\n' "$svc" "$c_ok" "$c_off" ;;
+      active)          printf '  %-22s %sactive%s\n' "$svc" "$c_ok" "$c_off" ;;
       inactive|failed) printf '  %-22s %s%s%s\n' "$svc" "$c_warn" "$s" "$c_off" ;;
-      "") ;;  # service unit doesn't exist; silent
     esac
   done
 
-  if pacman -Q thermald >/dev/null 2>&1; then
-    printf '  thermald pkg:          %s%s%s\n' "$c_ok" "$(pacman -Q thermald | awk '{print $2}')" "$c_off"
-  else
-    printf '  thermald pkg:          %snot installed%s\n' "$c_warn" "$c_off"
-  fi
-  if pacman -Q intel-lpmd >/dev/null 2>&1; then
-    printf '  intel-lpmd pkg:        %s%s%s\n' "$c_ok" "$(pacman -Q intel-lpmd | awk '{print $2}')" "$c_off"
-  else
-    printf '  intel-lpmd pkg:        %snot installed%s\n' "$c_warn" "$c_off"
-  fi
+  for svc in thermald intel-lpmd; do
+    version="$(pkg_version "$svc")"
+    if [[ -n $version ]]; then
+      printf '  %-22s %s%s%s\n' "$svc pkg:" "$c_ok" "$version" "$c_off"
+    else
+      printf '  %-22s %snot installed%s\n' "$svc pkg:" "$c_warn" "$c_off"
+    fi
+  done
 }

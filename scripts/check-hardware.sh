@@ -11,6 +11,55 @@ ok()    { printf '  %sOK%s   %s\n' "$c_ok" "$c_off" "$*"; }
 warn()  { printf '  %sWARN%s %s\n' "$c_warn" "$c_off" "$*"; }
 fail()  { printf '  %sFAIL%s %s\n' "$c_err" "$c_off" "$*"; }
 note()  { printf '  %s%s%s\n' "$c_dim" "$*" "$c_off"; }
+log()   { note "$*"; }
+die()   { fail "$*"; exit 1; }
+
+# Report the platform exactly as the patcher resolves it. Run from a clone this
+# uses lib/distro.sh itself; the README also documents this script as a
+# `curl | bash` one-liner, where that file is not on disk, so the three probes
+# it needs have a self-contained fallback below.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+# shellcheck source=../lib/distro.sh
+[[ -f "$SCRIPT_DIR/../lib/distro.sh" ]] && source "$SCRIPT_DIR/../lib/distro.sh"
+
+if ! declare -F distro_family >/dev/null; then
+  distro_family() {
+    local id="" id_like="" token
+    if [[ -r /etc/os-release ]]; then
+      # shellcheck disable=SC1091
+      id="$( { . /etc/os-release; printf '%s' "${ID:-}"; } 2>/dev/null || true )"
+      # shellcheck disable=SC1091
+      id_like="$( { . /etc/os-release; printf '%s' "${ID_LIKE:-}"; } 2>/dev/null || true )"
+    fi
+    # shellcheck disable=SC2086
+    for token in $id $id_like; do
+      case "$token" in
+        arch)          echo arch;   return 0 ;;
+        debian|ubuntu) echo debian; return 0 ;;
+      esac
+    done
+    if command -v pacman >/dev/null 2>&1; then echo arch
+    elif command -v dpkg-query >/dev/null 2>&1; then echo debian
+    else echo unknown
+    fi
+  }
+  pkg_manager() {
+    if command -v pacman >/dev/null 2>&1; then echo pacman
+    elif command -v dpkg-query >/dev/null 2>&1; then echo apt
+    else echo none
+    fi
+  }
+  cmdline_backend() {
+    if command -v limine-update >/dev/null 2>&1 ||
+       command -v limine-mkinitcpio >/dev/null 2>&1; then echo limine
+    elif command -v kernelstub >/dev/null 2>&1; then echo kernelstub
+    elif [[ -f /etc/default/grub ]] &&
+         { command -v update-grub >/dev/null 2>&1 ||
+           command -v grub-mkconfig >/dev/null 2>&1; }; then echo grub
+    else echo none
+    fi
+  }
+fi
 
 printf '%sasus-expertbook-linux — hardware compatibility probe%s\n\n' "$c_bold" "$c_off"
 
@@ -186,13 +235,23 @@ echo
 
 # 10) Distro
 printf '%sDistro%s\n' "$c_bold" "$c_off"
-if [[ -f /etc/arch-release ]]; then
-  ok "Arch (or derivative) — patcher's pacman + paths assumed correct"
-elif command -v pacman >/dev/null 2>&1; then
-  ok "$(awk -F= '/^PRETTY_NAME=/{gsub(/"/,""); print $2}' /etc/os-release 2>/dev/null) — pacman present"
-else
-  warn "non-pacman distro — modules' files still apply, but intel-perf-fix's package install will need adapting"
-fi
+pretty="$(awk -F= '/^PRETTY_NAME=/{gsub(/"/,""); print $2}' /etc/os-release 2>/dev/null)"
+case "$(distro_family)" in
+  arch)
+    ok "${pretty:-Arch (or derivative)} — pacman; every module is supported here"
+    ;;
+  debian)
+    ok "${pretty:-Debian (or derivative)} — apt/dpkg"
+    note "supported so far: intel-perf-fix, plus every module whose payload is"
+    note "plain config files (touchpad-fix, wifi-fix). The remaining modules still"
+    note "assume Arch — see issue #4 for the cross-distro port status."
+    ;;
+  *)
+    warn "${pretty:-unknown distribution} — no supported package manager detected"
+    note "file-only modules still apply; anything that installs packages will not"
+    ;;
+esac
+note "package manager: $(pkg_manager)    boot parameters: $(cmdline_backend)"
 echo
 
 # Summary
@@ -202,6 +261,11 @@ all_pass=1
 
 if (( all_pass == 1 )); then
   printf '%sResult: install-all is appropriate for this hardware.%s\n' "$c_ok" "$c_off"
+  if [[ "$(distro_family)" != arch ]]; then
+    printf '%sModules that install packages from the AUR (webcam-ai-fix,\n' "$c_dim"
+    printf 'keyboard-backlight-fix) are still Arch-only: install-all runs them but\n'
+    printf 'they will not install anything here.%s\n' "$c_off"
+  fi
   printf '\n  git clone https://github.com/burakgon/asus-expertbook-linux.git\n'
   printf '  cd asus-expertbook-linux\n'
   printf '  ./patch.sh install-all\n'

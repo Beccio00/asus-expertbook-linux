@@ -433,7 +433,8 @@ Camera firmware
   OK   ASUS 3009 / 10.1.2.3009 baseline satisfied (ESRT raw 479569)
 
 Distro
-  OK   Arch (or derivative) — patcher's pacman + paths assumed correct
+  OK   CachyOS Linux — pacman; every module is supported here
+  package manager: pacman    boot parameters: limine
 
 Result: install-all is appropriate for this hardware.</code></pre>
     </div>
@@ -651,7 +652,7 @@ sudo reboot</code></pre>
   1   audio-fix                3.1.0    3.1.0     up to date     Adaptive ghost-RT722 fix + HiFi audio
   2   camera-firmware          3009     3009      up to date     Verified camera UEFI capsule
   3   display-fix              1.3.0    1.3.0     up to date     Linux 7.2 defaults + DPCD brightness
-  4   intel-perf-fix           1.1.0    1.1.0     up to date     thermald + intel-lpmd
+  4   intel-perf-fix           1.2.0    1.2.0     up to date     thermald + intel-lpmd
   5   keyboard-backlight-auto  1.0.0    1.0.0     up to date     Ambient-light keyboard backlight
   6   keyboard-backlight-fix   2.0.0    -         not installed  (superseded) asusd workaround
   7   touchpad-fix             1.1.1    1.1.1     up to date     PixArt 093A:4F05 pressure quirk
@@ -886,9 +887,16 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
         </p>
         <p><strong>Packages installed (no payload files):</strong></p>
         <ul>
-          <li><code>thermald</code> (extra repo) — <code>thermald.service</code> enabled</li>
-          <li><code>intel-lpmd</code> (extra / cachyos repo, plain pacman) — <code>intel_lpmd.service</code> enabled</li>
+          <li><code>thermald</code> (Arch <code>extra</code>; Debian/Ubuntu <code>main</code>) — <code>thermald.service</code> enabled</li>
+          <li><code>intel-lpmd</code> (Arch <code>extra</code>/<code>cachyos</code>; Ubuntu <code>universe</code>, not in Debian) — <code>intel_lpmd.service</code> enabled</li>
         </ul>
+        <p>
+          This is the first module ported off <code>pacman</code>: package and
+          service calls go through <code>lib/distro.sh</code>, so the same hook
+          runs on apt systems too. Where <code>intel-lpmd</code> is unavailable
+          the module installs <code>thermald</code> alone and says so, rather
+          than failing.
+        </p>
         <p>
           Both daemons coexist with the existing <code>power-profiles-daemon</code>:
           PPD handles user profile, thermald handles thermal, intel-lpmd handles
@@ -1169,6 +1177,18 @@ EC set level 0/3 | manual override active for 0.0-18.4 lux (reading 9.2)</code><
         discoverable module. The patcher records the installed version
         under <code>/var/lib/asus_expertboot_patcher/</code> so subsequent
         operations know whether each module needs an update.
+      </p>
+      <p class="sub">
+        <strong>Distros.</strong> Arch and its derivatives (CachyOS,
+        EndeavourOS, Manjaro) are the reference platform and run every module.
+        Debian, Ubuntu and Pop!_OS are supported incrementally:
+        <code>lib/distro.sh</code> abstracts the package manager, kernel-header
+        discovery, initramfs regeneration, kernel-cmdline backend
+        (Limine / kernelstub / GRUB) and service enablement, and modules are
+        being moved onto it one at a time. Working there today:
+        <code>touchpad-fix</code>, <code>wifi-fix</code> (config files only)
+        and <code>intel-perf-fix</code>. Progress is tracked in
+        <a href="https://github.com/burakgon/asus-expertbook-linux/issues/4">issue&nbsp;#4</a>.
       </p>
 
       <div class="grid grid-2">

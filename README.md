@@ -39,12 +39,14 @@ curl -fsSL https://raw.githubusercontent.com/burakgon/asus-expertbook-linux/main
 | Audio codec | Cirrus `CS42L43` + 2× `CS35L56` (subsystem `1043:15e4`) | Per-OEM speaker firmware needed |
 | Wi-Fi card | Intel Wi-Fi 7 `BE211` (`8086:e440`) | iwlmld-mode tunables apply here |
 | Ambient light sensor | `iio` device named `als` with `in_illuminance_raw` | `keyboard-backlight-auto` reads it to drive the keyboard backlight |
-| Distro | Arch / CachyOS / any Arch-derivative | The patcher uses `pacman` and reads `/etc` paths Arch-style |
+| Distro | Arch / CachyOS / any Arch-derivative — Debian / Ubuntu / Pop!_OS partially | Every module works on Arch; on Debian families see the [support table](#kernel--distro-compatibility) |
 
 If you're on a sibling model (`104315d4` / `104315f4`) and willing to test, see
 [Adding a new module / model](#adding-a-new-module-or-model). If you're on a
-different distro, the modules themselves still apply — only the
-`pacman`-based package-install steps are Arch-specific.
+Debian-family distro, see the per-module status in
+[Kernel & distro compatibility](#kernel--distro-compatibility) — the config-file
+modules apply as-is, and the package-installing ones are being ported one at a
+time via [`lib/distro.sh`](lib/distro.sh).
 
 ## What this actually fixes — before / after
 
@@ -381,17 +383,25 @@ all idle work concentrates on a single LP-E core and the P-cores deep-sleep.
 
 <details><summary><b>The fix</b> — install + enable thermald and intel-lpmd</summary>
 
-| Package | Source | Service | Effect |
-|---|---|---|---|
-| `thermald` | `extra` repo | `thermald.service` | P/E-core-aware thermal throttle. |
-| `intel-lpmd` | `extra` / `cachyos` repo | `intel_lpmd.service` | Parks idle work on LP-E core, lets P-cores deep-sleep. |
+| Package | Arch source | Debian/Ubuntu source | Service | Effect |
+|---|---|---|---|---|
+| `thermald` | `extra` | `main` | `thermald.service` | P/E-core-aware thermal throttle. |
+| `intel-lpmd` | `extra` / `cachyos` | `universe` (Ubuntu 24.04+); **not in Debian** | `intel_lpmd.service` | Parks idle work on LP-E core, lets P-cores deep-sleep. |
+
+The package names happen to match across both families. Where `intel-lpmd`
+is missing the module says so and installs `thermald` alone rather than
+failing — half the win is still worth having. The service unit name is
+resolved at runtime (`svc_unit`) instead of hardcoded, because it is a
+packaging decision each distribution makes independently.
 
 Both coexist with the existing `power-profiles-daemon` (PPD handles user
 profile, thermald handles thermal, intel-lpmd handles idle topology).
 
 This module ships **no payload files** — it's purely package install + service
 enable in the post-install hook. The patcher tracks it the same way it
-tracks file-based modules (versioned, idempotent, status-checked).
+tracks file-based modules (versioned, idempotent, status-checked). Package and
+service calls go through [`lib/distro.sh`](lib/distro.sh), so the same hook
+runs unchanged on pacman and apt systems.
 
 </details>
 
@@ -594,6 +604,8 @@ asus-expertbook-linux/
 ├── wifi-fix/  …
 ├── upstream-patches/           # accepted/pending/retired upstream tracking
 │   └── 0001, 0003, 0004.patch
+├── lib/
+│   └── distro.sh               # package manager / initramfs / bootloader / services
 ├── docs/                       # the GitHub Pages site
 └── scripts/
     └── check-hardware.sh       # one-shot compatibility check
@@ -633,10 +645,30 @@ operations know whether each module is `up to date`, `update available`,
   all use the same `/etc/udev/hwdb.d`, `/etc/libinput`,
   `/etc/modprobe.d`, `/etc/wireplumber/wireplumber.conf.d` paths the
   modules write to.
+- **Debian / Ubuntu / Pop!_OS:** partial, and being added one module at a
+  time. [`lib/distro.sh`](lib/distro.sh) abstracts the package manager,
+  kernel-header discovery, initramfs regeneration, kernel-cmdline backend and
+  service enablement, so a module written against those helpers runs on both
+  families. Ported so far:
+
+  | Module | Debian/Ubuntu | Note |
+  |---|---|---|
+  | `touchpad-fix` | works | config files only, nothing distro-specific |
+  | `wifi-fix` | works | config files only |
+  | `intel-perf-fix` | works | `thermald` in main; `intel-lpmd` in Ubuntu universe, absent on Debian and skipped with a warning |
+  | `display-fix` | not yet | needs the cmdline backend wired into the module |
+  | `audio-fix` | not yet | DKMS builds, but the `NoExtract` UCM pin has no direct equivalent (closest is `dpkg-divert`) |
+  | `camera-firmware` | not yet | needs `fwupd`, `jq`, `7z`, `curl` mapped to Debian names |
+  | `webcam-ai-fix`, `keyboard-backlight-fix` | not planned | depend on AUR-only packages (`obs-backgroundremoval`, `asusctl`) |
+
+  Tracking issue: [#4](https://github.com/burakgon/asus-expertbook-linux/issues/4).
 - **Bootloader assumption (display-fix):** `limine` via
   `limine-mkinitcpio-hook`, where `/etc/limine-entry-tool.d/` drop-ins are the
   source of truth. If you use systemd-boot or GRUB, the module's
   cmdline-injection hook needs swapping; the modprobe.d half still works.
+  `lib/distro.sh` already implements all three backends
+  (`cmdline_backend` → `limine` | `kernelstub` | `grub`); the module itself
+  has not been migrated onto them yet.
 
 ## Adding a new module or model
 
@@ -657,6 +689,34 @@ module_post_install()   { …; }   # optional
 module_post_uninstall() { …; }   # optional
 module_status_extra()   { …; }   # optional
 ```
+
+### Platform helpers
+
+Hooks run in a subshell that inherits everything `patch.sh` defines, including
+[`lib/distro.sh`](lib/distro.sh). Use these instead of calling `pacman`,
+`mkinitcpio`, `limine-update` or `systemctl` directly, and the module works on
+Arch and Debian families alike:
+
+| Helper | Does |
+|---|---|
+| `distro_family` | `arch` \| `debian` \| `unknown` (reads `ID` *and* `ID_LIKE`) |
+| `pkg_manager` | `pacman` \| `apt` \| `none` |
+| `pkg_install <pkg>…` | `pacman -S --needed --noconfirm` / `apt-get install -y` |
+| `pkg_version <pkg>` | installed version, empty when absent |
+| `pkg_installed` / `pkg_available` | is it installed / known to the repos |
+| `pkg_atleast <pkg> <ver>` | version comparison, for gating bundled payloads |
+| `pkg_remove_hint <pkg>…` | the removal command to print for the user |
+| `kernel_list` | installed kernel releases, one per line |
+| `kernel_headers_present [kver]` / `kernel_headers_install [kver]` | DKMS prerequisites |
+| `initramfs_regen [reason]` | `limine-mkinitcpio` → `mkinitcpio -P` → `update-initramfs` → `dracut` |
+| `cmdline_backend` | `limine` \| `kernelstub` \| `grub` \| `none` |
+| `cmdline_add` / `cmdline_remove <param>…` | idempotent kernel-parameter edits |
+| `cmdline_active` / `cmdline_active_value` / `cmdline_configured` | what is live vs. staged |
+| `svc_unit <candidate>…` | resolve a unit name that differs between distros |
+| `svc_enable_now` / `svc_disable_now` / `svc_is_active` / `svc_exists` | systemd |
+
+Testing overrides — never set these in normal use: `GRUB_FILE`,
+`KERNELSTUB_FILE`, `LIMINE_DROPIN_DIR`, `CMDLINE_BACKEND`.
 
 Sibling-model contributions for `1043:15d4` and `1043:15f4` ExpertBook
 Ultra variants are very welcome — open a PR with your subsystem ID's
