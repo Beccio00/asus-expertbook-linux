@@ -159,7 +159,32 @@ else
 fi
 echo
 
-# 9) Distro
+# 9) Ambient light sensor + keyboard backlight
+printf '%sAmbient light sensor / keyboard backlight%s\n' "$c_bold" "$c_off"
+als_dev=""
+for d in /sys/bus/iio/devices/iio:device*; do
+  [[ -r "$d/name" ]] || continue
+  if [[ "$(cat "$d/name" 2>/dev/null)" == "als" && -r "$d/in_illuminance_raw" ]]; then
+    als_dev="$d"; break
+  fi
+done
+if [[ -n $als_dev ]]; then
+  als_raw="$(cat "$als_dev/in_illuminance_raw" 2>/dev/null || echo 0)"
+  als_scale="$(cat "$als_dev/in_illuminance_scale" 2>/dev/null || echo 1)"
+  als_lux="$(awk -v r="$als_raw" -v s="$als_scale" 'BEGIN{printf "%.1f", r*s}')"
+  ok "iio 'als' at ${als_dev##*/} reading ${als_lux} lux — keyboard-backlight-auto applies"
+else
+  note "no iio 'als' device — keyboard-backlight-auto has nothing to read"
+fi
+if [[ -w /sys/class/leds/asus::kbd_backlight/brightness || -e /sys/class/leds/asus::kbd_backlight/brightness ]]; then
+  ok "asus::kbd_backlight LED present (max $(cat /sys/class/leds/asus::kbd_backlight/max_brightness 2>/dev/null || echo '?'))"
+  note "read-back always reports 0 on this firmware — expected, not a fault; see keyboard-backlight-fix"
+else
+  note "asus::kbd_backlight LED not present"
+fi
+echo
+
+# 10) Distro
 printf '%sDistro%s\n' "$c_bold" "$c_off"
 if [[ -f /etc/arch-release ]]; then
   ok "Arch (or derivative) — patcher's pacman + paths assumed correct"

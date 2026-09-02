@@ -38,6 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/burakgon/asus-expertbook-linux/main
 | Touchpad | PixArt I²C-HID `093A:4F05` (ACPI `ASCP1D80`) | The pressure-axis quirk applies here |
 | Audio codec | Cirrus `CS42L43` + 2× `CS35L56` (subsystem `1043:15e4`) | Per-OEM speaker firmware needed |
 | Wi-Fi card | Intel Wi-Fi 7 `BE211` (`8086:e440`) | iwlmld-mode tunables apply here |
+| Ambient light sensor | `iio` device named `als` with `in_illuminance_raw` | `keyboard-backlight-auto` reads it to drive the keyboard backlight |
 | Distro | Arch / CachyOS / any Arch-derivative | The patcher uses `pacman` and reads `/etc` paths Arch-style |
 
 If you're on a sibling model (`104315d4` / `104315f4`) and willing to test, see
@@ -56,7 +57,8 @@ different distro, the modules themselves still apply — only the
 | **Intel Core Ultra X7/X9** Panther Lake hybrid (P + E + LP-E cores) | **Idle power 4–5 W**, fans audible at idle, P-cores never deep-sleep. | Idle ≈ 2–2.5 W. Workload parks on a single LP-E core. P-cores reach `C10`. | [`intel-perf-fix`](intel-perf-fix/) |
 | **USB UVC webcam** (+ idle Panther Lake NPU) | **No AI camera effects.** Windows Studio Effects (background blur, smart framing) doesn't exist on Linux out of the box. | **CPU** background blur via OBS + `obs-backgroundremoval`, exposed as a virtual camera ("AI Camera"). *(NPU offload is not available in the OBS plugin on Linux — see the module's reality-check note.)* | [`webcam-ai-fix`](webcam-ai-fix/) |
 | **Shinetech USB camera + UEFI ESRT target** | ASUS camera firmware 3009 is distributed as a Windows EXE. | Compares locally against the fixed, verified 3009 baseline; offers a confirmed `fwupd` capsule update without running Windows or querying ASUS for newer versions. | [`camera-firmware`](camera-firmware/) |
-| **ASUS BIOS `SLKB` ACPI method** (BIOS `B9406CAA.304`) | **KDE keyboard-backlight slider does nothing** — but the **Fn hotkeys still work** (the backlight is not dead). `SLKB` clamps OS-initiated `0..3` writes to `Local0 = Zero`, so KDE / `brightnessctl` / sysfs writes silently no-op. | *(optional)* KDE slider works: `asusd` translates kernel writes into the OEM-tested `0x100..0x103` range. | [`keyboard-backlight-fix`](keyboard-backlight-fix/) |
+| **Ambient light sensor** (`iio` `als`) + keyboard backlight | **The backlight never adapts to the room.** KDE PowerDevil reads the sensor for *screen* brightness only; the keyboard stays wherever the Fn keys left it, and comes up dark after every boot. | *(optional)* The backlight follows the room using Windows 11's documented ALR curve — dim in the dark, brightest around 40–100 lux, off above 200–300 lux. Forced off with the lid shut; Fn keys still take over. | [`keyboard-backlight-auto`](keyboard-backlight-auto/) |
+| **ASUS BIOS `SLKB` ACPI method** (BIOS `B9406CAA.312`) | **Keyboard brightness reads back as `0`** no matter what it was set to — sysfs, UPower and `brightnessctl` all report a dark keyboard, and `systemd-backlight` restores `0` at every boot. Writes themselves reach the EC fine. | *(superseded)* Nothing to fix on the write path: the v1.x `asusd` workaround targeted an ACPI branch mainline `asus-wmi` never reaches. Kept for older firmware, skips install by default. | [`keyboard-backlight-fix`](keyboard-backlight-fix/) |
 
 > **Nothing this repo installs is a band-aid in the bad sense.** Every module
 > uses the exact same upstream-recognised mechanism (udev hwdb, libinput
@@ -80,7 +82,9 @@ After reboot:
 ./patch.sh status
 ```
 
-You should see all eight modules `up to date` (or not applicable) and their runtime checks green.
+You should see all nine modules `up to date` (or not applicable) and their runtime
+checks green — except `keyboard-backlight-fix`, which reports `not installed`
+because it deliberately supersedes itself.
 
 ### Or pick à la carte
 
@@ -109,10 +113,11 @@ typing single letters. Numbered table, color-coded state, cached.
   2   camera-firmware           3009     3009      up to date     Verified camera UEFI capsule
   3   display-fix               1.3.0    1.3.0     up to date     Linux 7.2 display defaults + DPCD brightness
   4   intel-perf-fix            1.1.0    1.1.0     up to date     thermald + intel-lpmd
-  5   keyboard-backlight-fix    1.1.0    1.1.0     up to date     (optional) KDE backlight slider
-  6   touchpad-fix              1.1.1    1.1.1     up to date     PixArt 093A:4F05 pressure quirk
-  7   webcam-ai-fix             1.1.0    1.1.0     up to date     OBS CPU background blur
-  8   wifi-fix                  2.1.0    2.1.0     up to date     BE211: EHT fallback + C106 diagnostics
+  5   keyboard-backlight-auto   1.0.0    1.0.0     up to date     Ambient-light keyboard backlight
+  6   keyboard-backlight-fix    2.0.0    -         not installed  (superseded) asusd workaround
+  7   touchpad-fix              1.1.1    1.1.1     up to date     PixArt 093A:4F05 pressure quirk
+  8   webcam-ai-fix             1.1.0    1.1.0     up to date     OBS CPU background blur
+  9   wifi-fix                  2.1.0    2.1.0     up to date     BE211: EHT fallback + C106 diagnostics
 
 Actions
   i <num>    install / update module (idempotent — re-runs post hooks)
@@ -390,57 +395,166 @@ tracks file-based modules (versioned, idempotent, status-checked).
 
 </details>
 
-### 7. [`keyboard-backlight-fix`](keyboard-backlight-fix/) — *(optional)* restore software/KDE backlight control
+### 7. [`keyboard-backlight-auto`](keyboard-backlight-auto/) — *(optional)* ambient-light keyboard backlight
 
-> **The backlight is not dead** — the **Fn hotkeys** toggle it fine (handled by
-> the EC in hardware, bypassing the buggy ACPI path). This module is **optional**:
-> it only restores *software* control (the KDE slider / `brightnessctl` / sysfs).
+> KDE PowerDevil reads the ambient light sensor for **screen** brightness only —
+> there is no keyboard equivalent. Without this module the backlight only ever
+> changes when you press the Fn keys, and `systemd-backlight` restores a dark
+> keyboard at every boot.
 
-<details><summary><b>The bug (software side)</b> — ASUS BIOS clamps OS-initiated brightness writes to zero</summary>
+<details><summary><b>The curve</b> — Microsoft's Windows 11 default, and it is deliberately not monotonic</summary>
 
-The B9406CAA BIOS (`B9406CAA.304`) ships a broken `SLKB` ACPI method.
-Disassembled from the live DSDT:
+The bucketized **ambient light response (ALR) curve** is Microsoft's documented
+Windows 11 default for *Keyboard Backlight Autobrightness*, reproduced verbatim
+down to the registry string format:
+
+| Bucket | Min lux | Max lux | Percentage | Level here (max 3) |
+|---:|---:|---:|---:|---:|
+| 1 | 0 | 6 | 35% | 1 |
+| 2 | 5 | 14 | 52% | 2 |
+| 3 | 12 | 32 | 70% | 2 |
+| 4 | 30 | 45 | 88% | 3 |
+| 5 | 40 | 100 | **100%** | 3 |
+| 6 | 95 | 110 | 88% | 3 |
+| 7 | 105 | 160 | 70% | 2 |
+| 8 | 155 | 205 | 52% | 2 |
+| 9 | 200 | 300 | 0% | 0 |
+
+The keyboard is *dimmest-but-on* in the dark, brightest between 40 and 100 lux,
+and off above 200–300 lux. That shape is the counter-intuitive part and it is
+intentional: in true darkness a keyboard at full power is glare against a
+dark-adapted eye, and in a bright room the keycap legends are already readable
+by ambient light, where backlighting only washes out their contrast.
+
+Apple's *Computer light adjustment* patents (US 7,839,379 and family) describe
+the simpler inverse relationship instead. We follow Microsoft's because it is an
+exact, numeric, currently-maintained table rather than a prose description.
+
+</details>
+
+<details><summary><b>The rest of the machinery</b> — smoothing, hysteresis, manual override, lid</summary>
+
+| Piece | Where it comes from |
+|---|---|
+| **Smoothing** | GNOME's `gsd-power-manager.c`: `alpha = 1 / (1 + τ/dt)`, `acc = alpha·reading + (1−alpha)·acc`, with `τ = 1/(2π × 0.1 Hz)` ≈ **1.6 s**. Driven by the measured `dt`, so a missed sample doesn't distort it. |
+| **Hysteresis** | Free, from Microsoft's **overlapping** buckets (1 is 0–6 lux, 2 is 5–14, …). The daemon stays in the bucket it is in while the reading remains inside that bucket's range, so a reading hovering at 5.5 lux cannot flap between 35% and 52%. |
+| **Manual override** | Microsoft's lookup table: an Fn keypress creates a window around the current reading (at 120 lux, `40:150:0.60:0.60` gives 48–192 lux) and autobrightness resumes once the reading leaves it. Detected via `brightness_hw_changed` — see below. |
+| **Lid** | Ours. Lid shut → backlight forced to 0, and any active override is dropped so the curve, not a level chosen in another room, decides on reopen. State comes from the `Lid Switch` evdev device, with `/proc/acpi/button/lid/*/state` as the initial reading and fallback. |
+
+Finding the keypress took some digging. The Fn backlight keys emit **no input
+event at all** — verified on 2026-09-02 by listening on all fifteen
+`/dev/input/event*` devices while they were pressed, which captured nothing but
+touchpad traffic. The `Asus WMI hotkeys` device advertises
+`KEY_KBDILLUMUP`/`KEY_KBDILLUMDOWN` only because `asus-nb-wmi`'s sparse keymap
+declares them.
+
+The OS is not blind to them though. The kernel reports EC-initiated changes
+through the LED class's **`brightness_hw_changed`** attribute (`POLLPRI`) —
+which is how UPower notices and relays
+`BrightnessChangedWithSource(level, "internal")`, and in turn what raises KDE's
+on-screen display. That attribute carries the **real level**, unlike the plain
+`brightness` node stuck at `0`, so the daemon both detects the press and learns
+what you chose:
+
+```
+EC set level 3/3 | manual override active for 0.0-18.5 lux (reading 9.2)
+EC set level 0/3 | manual override active for 0.0-18.4 lux (reading 9.2)
+```
+
+One adaptation to the spec remains: Microsoft's host holds a *specific*
+percentage during an override, while here it means **"stop writing"** — the
+level you picked is yours until the ambient reading leaves the window. A value
+matching what the daemon itself last wrote is treated as its own change echoing
+back, so it never starts a spurious override. To stop the daemon touching the
+backlight at all, set `enabled = no` or
+`sudo systemctl stop kbd-backlight-auto`.
+
+Watch it decide without letting it touch the backlight:
+
+```sh
+sudo kbd-backlight-auto --probe -v
+```
+
+```
+17.3 lux | bucket 3 (12-32 lux, 70%) | would set level 2/3
+20.4 lux | bucket 3 (12-32 lux, 70%) | level 2/3 (unchanged)
+```
+
+Everything is tunable in `/etc/kbd-backlight-auto.conf`, including the curve and
+the override table in Microsoft's own string format. The one knob worth knowing
+about is `calibration`: the curve's thresholds are **absolute lux**, so a
+mis-scaled sensor puts the keyboard in the wrong bucket.
+
+</details>
+
+### 8. [`keyboard-backlight-fix`](keyboard-backlight-fix/) — *(superseded)* the v1.x `asusd` workaround, and why it was wrong
+
+> **This module skips its own install.** On BIOS `B9406CAA.312` with mainline
+> `asus-wmi`, keyboard brightness already reaches the EC without it. It is kept
+> for older firmware and for the record.
+
+<details><summary><b>The correction</b> — the write path was never broken; the read path is</summary>
+
+Versions 1.x claimed the BIOS's `SLKB` ACPI method clamped OS-initiated
+brightness writes to zero, and shipped `asusd` to translate them into the
+OEM-tested `0x100..0x103` range. Re-measured on **2026-09-02** with `asusctl`
+**not installed**, `/etc/asusd` absent and `asusd` inactive:
+
+| Path | Result |
+|---|---|
+| `echo 0/1/2/3 > /sys/class/leds/asus::kbd_backlight/brightness` | **Works** — the keyboard visibly steps through all four levels |
+| KDE PowerDevil slider | **Works**, for the same reason |
+| `cat …/brightness`, UPower `GetBrightness`, `brightnessctl` | **Always `0`** — all three read the same attribute |
+
+The `SLKB` disassembly was accurate; the claim about which branch Linux reaches
+was not. Mainline `asus-wmi` never writes the bare `0..3` range that the buggy
+branch clamps:
 
 ```c
-Method (SLKB, 1, NotSerialized) {
-    If    ((Arg0 >= 0x0100) && (Arg0 <= 0x0106)) { Local0 = (Arg0 - 0x0100) }
-    ElseIf((Arg0 >= 0x80)   && (Arg0 <= 0x83))   { Local0 = (Arg0 - 0x80) * 0x21 ... }
-    ElseIf((Arg0 >= Zero)   && (Arg0 <= 0x03))   { Local0 = Zero }   // ← BUG
-    STBC (Zero, Local0)
-    Return (One)
+static void kbd_led_update(struct asus_wmi *asus)
+{
+	int ctrl_param = 0;
+
+	scoped_guard(spinlock_irqsave, &asus_ref.lock)
+		ctrl_param = 0x80 | (asus->kbd_led_wk & 0x7F);
+	asus_wmi_set_devstate(ASUS_WMI_DEVID_KBD_BACKLIGHT, ctrl_param, NULL);
 }
 ```
 
-The mainline `asus-wmi` Linux driver writes the standard `0..3` kernel
-range, which hits the third branch — and it **unconditionally clamps
-`Local0` to zero** before passing to STBC (the EC command emitter). End
-result: every KDE / `brightnessctl` / direct `/sys` write is silently
-turned into "set brightness 0", and the keyboard backlight stays off.
+`0x80 | level` lands in `0x80..0x83` — `SLKB`'s **second** branch, the one v1.x
+itself documented as working. `asusd`'s range translation had nothing to fix.
 
-The OEM-tested `0x100..0x103` range works correctly. Verified by hand
-via `acpi_call`: invoking `\_SB.PC00.LPCB.EC0.SLKB 0x103` lights the
-backlight.
+The real defect is `kbd_led_read()`: the firmware's query returns nothing usable,
+so the level always masks down to `0`. `asusd` does not fix that either — it is a
+firmware read path, not a range problem.
+
+The defect is in the *query* path only, though. The LED's sibling attribute
+`brightness_hw_changed` **does** report the real level whenever the EC changes it
+— that is how UPower relays `BrightnessChangedWithSource(…, "internal")` and how
+KDE's on-screen display appears on an Fn keypress. It is a notification, not a
+queryable state, so `cat brightness` stays broken; `keyboard-backlight-auto` uses
+it to stay in sync with a hand-set level. The visible cost is that
+`systemd-backlight@leds:asus::kbd_backlight` saves `0` at every shutdown and
+restores a dark keyboard at every boot; `keyboard-backlight-auto` is ordered
+`After=` it and overrides it within a second.
+
+The v1.x status check was a **false negative by construction** — it wrote a level
+and read it back, and the read is always `0`, so it reported `FAILED` on a
+perfectly working backlight. That check is gone.
+
+What stays unknown is whether software control was genuinely broken on BIOS
+`B9406CAA.304`, the firmware v1.x was written against; the reference machine has
+since moved to `312` and 304 is no longer testable. What can be said is that the
+*mechanism* v1.x blamed cannot have been the cause. That uncertainty is why the
+module is kept rather than deleted:
+
+```sh
+sudo KBF_FORCE=1 ./patch.sh install keyboard-backlight-fix
+```
 
 </details>
 
-<details><summary><b>The fix</b> — let the asusd userspace daemon translate the value range</summary>
-
-| File / package | Path | What it does |
-|---|---|---|
-| `xyz.ljones.Asusd.service` | `/usr/share/dbus-1/system-services/` | D-Bus activation entry for `asusd`. The `asusd.service` systemd unit is `Type=dbus`, but ASUS doesn't ship the matching D-Bus service file — without it nothing ever auto-starts the daemon. |
-| `acpi_call.conf` | `/etc/modules-load.d/` | Auto-load the `acpi_call` kernel module so `/proc/acpi/call` is available for direct ACPI invocations during debugging. |
-| `asusctl` package | `extra` repo | Provides the `asusd` daemon. |
-| `acpi_call-dkms` package | AUR | Optional. Kernel module exposing `/proc/acpi/call`. |
-| `/etc/asusd/` directory | (created in post_install) | `asusd` refuses to start without it; the package leaves it absent. |
-
-`asusd` translates standard kernel-level brightness writes into the
-OEM-tested `0x100..0x103` range before invoking ACPI, side-stepping the
-buggy branch. KDE PowerDevil's keyboard-brightness control then reaches
-the EC correctly.
-
-</details>
-
-### 8. [`camera-firmware`](camera-firmware/) — verified 3009 update without Windows
+### 9. [`camera-firmware`](camera-firmware/) — verified 3009 update without Windows
 
 The ASUS camera updater is a Windows EXE, but its payload is a signed UEFI
 capsule. This module reads the camera ESRT GUID locally and compares it only to
@@ -473,6 +587,7 @@ asus-expertbook-linux/
 ├── camera-firmware/            # verified ASUS 3009 capsule staging
 ├── display-fix/  …
 ├── intel-perf-fix/  …
+├── keyboard-backlight-auto/  …
 ├── keyboard-backlight-fix/  …
 ├── touchpad-fix/  …
 ├── webcam-ai-fix/  …
@@ -582,7 +697,8 @@ subsystem `1043:15e4` (this exact laptop). Sibling subsystems
 `104315d4` and `104315f4` ship different per-OEM tuning files in
 upstream `linux-firmware`. The camera capsule is strictly B9406CAA-only. The
 `touchpad-fix`, `wifi-fix`,
-`display-fix`, `intel-perf-fix`, `webcam-ai-fix`, and
+`display-fix`, `intel-perf-fix`, `webcam-ai-fix`,
+`keyboard-backlight-auto` and
 `keyboard-backlight-fix` modules are hardware-agnostic or match by
 family-level identifiers and apply more broadly.
 

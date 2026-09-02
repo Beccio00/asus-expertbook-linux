@@ -1,0 +1,35 @@
+[Unit]
+Description=Ambient-light driven keyboard backlight
+Documentation=https://github.com/burakgon/asus-expertbook-linux
+ConditionPathExists=/sys/class/leds/asus::kbd_backlight/brightness
+# systemd-backlight restores a saved level at boot. On this machine the LED's
+# read-back is broken so it always saves (and restores) 0 - run after it so the
+# curve gets the last word.
+After=systemd-backlight@leds:asus::kbd_backlight.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/kbd-backlight-auto
+Restart=on-failure
+RestartSec=2
+
+# Needs: read /sys/bus/iio + /proc/acpi, read /dev/input/event*, write the LED.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+IPAddressDeny=any
+PrivateNetwork=yes
+
+[Install]
+WantedBy=multi-user.target

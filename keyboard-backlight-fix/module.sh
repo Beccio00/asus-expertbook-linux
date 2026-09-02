@@ -1,85 +1,115 @@
-# keyboard-backlight-fix module manifest.  ── OPTIONAL module ──
+# keyboard-backlight-fix module manifest.  ── OPTIONAL, AND ALMOST CERTAINLY
+#                                             UNNECESSARY — see below ──
 #
-# IMPORTANT: the keyboard backlight already WORKS out of the box. The Fn
-# brightness hotkeys are handled by the EC/BIOS at the hardware level and
-# light the keyboard fine with no driver, no daemon, nothing installed.
-# This module does NOT fix a dead backlight — it restores *software /
-# OS-initiated* control (the KDE PowerDevil slider, brightnessctl, direct
-# /sys/class/leds writes), which is the only path the firmware bug breaks.
-# If you only ever use the Fn keys, you don't need this module at all.
+# HISTORY / CORRECTION (2026-09-02)
+# ---------------------------------
+# Versions 1.x of this module claimed that OS-initiated keyboard-backlight
+# writes were clamped to zero by a firmware bug, and shipped asusd as the
+# workaround. Re-measured on the reference machine, that diagnosis does not
+# hold. Both the claim and the workaround are retained here only for older
+# firmware; the module now refuses to install unless forced.
 #
-# The ASUS ExpertBook Ultra (B9406CAA, BIOS B9406CAA.304) has a firmware
-# bug in the SLKB ACPI method: when called with the standard 0..3
-# brightness range that the Linux asus-wmi driver uses, the method's
-# ElseIf branch *unconditionally clamps Local0 to zero* before passing it
-# to STBC, which writes EC command 0xBC. Result: every OS-initiated write
-# to /sys/class/leds/asus::kbd_backlight/brightness is silently turned
-# into "set brightness 0", so the KDE slider / brightnessctl / sysfs path
-# can't change the backlight — even though the Fn hotkeys (which don't go
-# through SLKB) keep working.
+# What was measured, with asusctl NOT installed, /etc/asusd absent and asusd
+# inactive (BIOS B9406CAA.312, Linux 7.2.0):
 #
-# Method (SLKB, 1, NotSerialized) {
-#     If    ((Arg0 >= 0x0100) && (Arg0 <= 0x0106)) { Local0 = (Arg0 - 0x0100) }
-#     ElseIf((Arg0 >= 0x80)   && (Arg0 <= 0x83))   { Local0 = (Arg0 - 0x80) * 0x21 ... }
-#     ElseIf((Arg0 >= Zero)   && (Arg0 <= 0x03))   { Local0 = Zero }    ← BUG
-#     STBC (Zero, Local0)
-#     Return (One)
-# }
+#   * Writing 0, 1, 2 and 3 to /sys/class/leds/asus::kbd_backlight/brightness
+#     changes the keyboard illumination across the full range, confirmed by
+#     eye. The KDE PowerDevil slider works for the same reason.
+#   * Reading that node back returns 0 every time, whatever was written.
+#     UPower's KbdBacklight.GetBrightness and `brightnessctl` agree, because
+#     all three read the same sysfs attribute.
 #
-# Software-control fix: asusd (the userspace ASUS daemon) translates the
-# standard kernel-level brightness writes into the OEM-tested 0x100..0x103
-# range before passing them to ACPI/EC, side-stepping the buggy branch.
-# Once asusd is running, KDE PowerDevil's keyboard-brightness control
-# reaches the EC correctly.
+# So the write path is fine and the READ path is broken — the opposite way
+# round from what v1.x documented.
 #
-# Upstream tracking: asus-armoury (mainline 6.19+) is gaining keyboard
-# firmware-attributes that would expose kbd backlight under
-# /sys/class/firmware-attributes/asus-armoury/attributes/kbd_* (Denis
-# Benato LKML series, 2025-12-25). When a shipping kernel exposes that
-# knob, the OS can set brightness through the correct ACPI range natively
-# and this asusd workaround becomes unnecessary — track it, like
-# display-fix tracks its upstream. As of 7.0.11 it is NOT present:
-# asus-armoury here exposes only charge_mode + pending_reboot, no kbd_*.
+# WHY THE OLD ANALYSIS WAS WRONG
+# ------------------------------
+# The SLKB disassembly itself was right; the claim about which branch Linux
+# reaches was not. Mainline asus-wmi never writes the bare 0..3 range:
 #
-# Three pieces have to be in place for this to work after reboot:
+#   static void kbd_led_update(struct asus_wmi *asus)
+#   {
+#           int ctrl_param = 0;
 #
-#   /etc/asusd/                  asusd refuses to start without the dir;
-#                                ships empty in pacman/asusctl. We mkdir.
+#           scoped_guard(spinlock_irqsave, &asus_ref.lock)
+#                   ctrl_param = 0x80 | (asus->kbd_led_wk & 0x7F);
+#           asus_wmi_set_devstate(ASUS_WMI_DEVID_KBD_BACKLIGHT, ctrl_param, NULL);
+#   }
 #
-#   xyz.ljones.Asusd dbus        the asusd.service unit is Type=dbus, but
-#   activation file              the matching activation entry isn't
-#                                shipped, so dbus never auto-spawns it.
-#                                We provide the activation file so any
-#                                client (KDE PowerDevil) triggers asusd
-#                                lazily on first use.
+# 0x80 | level lands in 0x80..0x83, which is SLKB's *second* branch — the one
+# v1.x already documented as working. The buggy `ElseIf ((Arg0 >= Zero) &&
+# (Arg0 <= 0x03)) { Local0 = Zero }` branch is unreachable from this driver.
+# asusd's range translation therefore had nothing to fix.
 #
-#   acpi_call (kernel module)    not strictly required for the running
-#                                asusd path, but we autoload it so any
-#                                follow-up debugging or fall-back tooling
-#                                that pokes EC ACPI methods directly
-#                                (e.g. /proc/acpi/call) is available.
+# The residual defect is on the way back in:
 #
-# Packages required (installed via post_install hook): asusctl (extra),
-# acpi_call-dkms (AUR via paru/yay).
+#   static int kbd_led_read(struct asus_wmi *asus, int *level, int *env)
+#   {
+#           retval = asus_wmi_get_devstate_bits(asus, ASUS_WMI_DEVID_KBD_BACKLIGHT,
+#                                               0xFFFF);
+#           if (retval == 0x8000)
+#                   retval = 0;
+#           ...
+#           if (level)
+#                   *level = retval & 0x7F;
+#
+# The firmware's query returns nothing usable, so *level is always 0. asusd
+# does not fix this either — it is a firmware read path, not a range problem.
+#
+# The defect is in the QUERY path only. The LED's sibling attribute
+# brightness_hw_changed does report the real level whenever the EC changes it
+# (an Fn keypress) — verified 2026-09-02 by watching UPower relay
+# BrightnessChangedWithSource(1|2|3, "internal") on the system bus, which is
+# also what raises KDE's on-screen display. It is a notification of what the
+# hardware just did, not a queryable state, so `cat brightness` stays broken;
+# but keyboard-backlight-auto uses it to stay in sync with a hand-set level.
+# The Fn keys themselves emit no input event on any of the 15 event devices.
+#
+# Visible consequence worth knowing about: systemd-backlight@leds:asus::
+# kbd_backlight saves the read-back value at shutdown, which is always 0, so
+# every boot restores a dark keyboard. keyboard-backlight-auto is ordered
+# After= it and overrides it within a second.
+#
+# WHAT REMAINS UNKNOWN
+# --------------------
+# Whether OS control was genuinely broken under the BIOS this module was
+# written against (B9406CAA.304). The reference machine has since been updated
+# to B9406CAA.312 (2026-06-15) and 304 is no longer available to test. What can
+# be said is that the *mechanism* v1.x blamed cannot have been the cause, and
+# that on 312 nothing here is needed.
+#
+# The v1.x status check was a false negative by construction: it wrote a level
+# and read it back, and the read is always 0, so it reported FAILED on a
+# perfectly working backlight. That check is gone.
 
 MODULE_NAME="keyboard-backlight-fix"
-MODULE_DESC="Make KDE-controlled keyboard backlight reach the EC despite ASUS BIOS SLKB firmware bug"
-MODULE_VERSION="1.1.0"
+MODULE_DESC="(superseded) asusd workaround for OS-initiated keyboard backlight writes"
+MODULE_VERSION="2.0.0"
 
 MODULE_FILES=(
   "xyz.ljones.Asusd.service:/usr/share/dbus-1/system-services/xyz.ljones.Asusd.service"
   "acpi_call.conf:/etc/modules-load.d/acpi_call.conf"
 )
 
-_kbf_aur_helper() {
-  local h
-  for h in paru yay; do
-    command -v "$h" >/dev/null 2>&1 && { printf '%s' "$h"; return 0; }
-  done
-  return 1
-}
+_kbf_led=/sys/class/leds/asus::kbd_backlight/brightness
 
-module_post_install() {
+module_install() {
+  if [[ ${KBF_FORCE:-0} != 1 ]]; then
+    echo "  This module is superseded and does nothing useful on BIOS B9406CAA.312"
+    echo "  with mainline asus-wmi: the driver writes 0x80|level, which SLKB handles"
+    echo "  correctly, so keyboard brightness already reaches the EC without asusd."
+    echo "  What is actually broken is reading the level back, which asusd cannot fix."
+    echo
+    echo "  If your keyboard backlight genuinely does not respond to the KDE slider"
+    echo "  or to a direct sysfs write, install it anyway with:"
+    echo "      sudo KBF_FORCE=1 ./patch.sh install keyboard-backlight-fix"
+    echo
+    echo "  See ./keyboard-backlight-fix/README.md for the full measurement."
+    return 10
+  fi
+
+  mod_install_files
+
   echo "  installing asusctl (extra repo)"
   pacman -S --needed --noconfirm asusctl 2>&1 | tail -3 || true
 
@@ -90,32 +120,21 @@ module_post_install() {
   systemctl reload dbus 2>/dev/null || systemctl reload dbus.socket 2>/dev/null || true
 
   echo
-  echo "  acpi_call-dkms is in the AUR. paru/yay needs an interactive sudo"
-  echo "  prompt during makepkg→install which scripted post_install can't"
-  echo "  supply. Run separately if not already installed:"
+  echo "  acpi_call-dkms is in the AUR. paru/yay needs an interactive sudo prompt"
+  echo "  during makepkg->install which a scripted hook can't supply. Run separately:"
   echo "      paru -S acpi_call-dkms"
   echo
 
-  # Load acpi_call now if available.
   if ! lsmod | grep -q '^acpi_call'; then
-    if modprobe acpi_call 2>/dev/null; then
-      echo "  loaded acpi_call now"
-    else
-      echo "  acpi_call not yet installed — skip"
-    fi
+    modprobe acpi_call 2>/dev/null && echo "  loaded acpi_call now" \
+      || echo "  acpi_call not yet installed — skip"
   fi
 
-  # Trigger asusd via dbus so the user gets working backlight in *this*
-  # session without having to log out + back in.
   if ! systemctl is-active --quiet asusd; then
     busctl --system call xyz.ljones.Asusd /xyz/ljones/Asusd \
       org.freedesktop.DBus.Peer Ping >/dev/null 2>&1 || \
       systemctl start asusd 2>/dev/null || true
   fi
-
-  echo
-  echo "Done. KDE keyboard-brightness slider should work immediately."
-  echo "Verify with: ./patch.sh status keyboard-backlight-fix"
 }
 
 module_post_uninstall() {
@@ -123,7 +142,7 @@ module_post_uninstall() {
   systemctl reload dbus 2>/dev/null || systemctl reload dbus.socket 2>/dev/null || true
 
   if systemctl is-active --quiet asusd; then
-    echo "  stopping asusd (was bus-activated; will only auto-start again if reinstalled)"
+    echo "  stopping asusd (was bus-activated; only auto-starts again if reinstalled)"
     systemctl stop asusd 2>/dev/null || true
   fi
 
@@ -135,75 +154,39 @@ module_post_uninstall() {
 }
 
 module_status_extra() {
-  if [[ -d /etc/asusd ]]; then
-    printf '  /etc/asusd dir:        %spresent%s\n' "$c_ok" "$c_off"
-  else
-    printf '  /etc/asusd dir:        %sMISSING — asusd will refuse to start%s\n' "$c_warn" "$c_off"
-  fi
+  local bios
+  bios="$(cat /sys/class/dmi/id/bios_version 2>/dev/null || true)"
+  [[ -n $bios ]] && printf '  BIOS:                  %s%s%s\n' "$c_dim" "$bios" "$c_off"
+
+  printf '  write path:            %s0x80|level via asus-wmi — SLKB OEM branch, works%s\n' \
+    "$c_ok" "$c_off"
+
+  # Reading the node back is broken in firmware. Report it as the known,
+  # expected defect it is — NOT as a failure, and never as a write test: the
+  # v1.x check wrote a value, read back 0, and wrongly declared the backlight
+  # dead. There is no way to verify the write path from software; the only
+  # honest test is to write a level and look at the keyboard.
+  local readback="n/a"
+  [[ -r $_kbf_led ]] && readback="$(cat "$_kbf_led" 2>/dev/null)"
+  printf '  sysfs read-back:       %sreads %s — firmware GET is broken, expected%s\n' \
+    "$c_dim" "$readback" "$c_off"
+  printf '  brightness_hw_changed: %sdoes report real levels on EC changes%s\n' \
+    "$c_dim" "$c_off"
 
   if pacman -Q asusctl >/dev/null 2>&1; then
-    printf '  asusctl pkg:           %s%s%s\n' "$c_ok" "$(pacman -Q asusctl | awk '{print $2}')" "$c_off"
+    printf '  asusctl pkg:           %s%s (not required)%s\n' \
+      "$c_dim" "$(pacman -Q asusctl | awk '{print $2}')" "$c_off"
+    local asusd_state
+    asusd_state="$(systemctl is-active asusd 2>/dev/null || true)"
+    printf '  asusd:                 %s%s%s\n' "$c_dim" "${asusd_state:-unknown}" "$c_off"
   else
-    printf '  asusctl pkg:           %snot installed%s\n' "$c_warn" "$c_off"
-  fi
-  if pacman -Q acpi_call-dkms >/dev/null 2>&1; then
-    printf '  acpi_call-dkms pkg:    %s%s%s\n' "$c_ok" "$(pacman -Q acpi_call-dkms | awk '{print $2}')" "$c_off"
-  else
-    printf '  acpi_call-dkms pkg:    %snot installed (paru -S acpi_call-dkms)%s\n' "$c_warn" "$c_off"
-  fi
-
-  if [[ -d /sys/module/acpi_call ]]; then
-    printf '  acpi_call kmod:        %sloaded%s\n' "$c_ok" "$c_off"
-  else
-    printf '  acpi_call kmod:        %snot loaded%s\n' "$c_dim" "$c_off"
+    printf '  asusctl pkg:           %snot installed (not required)%s\n' "$c_ok" "$c_off"
   fi
 
-  local asusd_state
-  asusd_state="$(systemctl is-active asusd 2>/dev/null || true)"
-  case "$asusd_state" in
-    active)        printf '  asusd:                 %sactive (bus-activated by KDE/upower)%s\n' "$c_ok" "$c_off" ;;
-    *)             printf '  asusd:                 %s%s — should auto-start when KDE polls UPower%s\n' "$c_dim" "$asusd_state" "$c_off" ;;
-  esac
-
-  # The only check that actually proves software control works: write a
-  # value to the LED brightness node and read it back. With the SLKB bug
-  # and asusd absent, the EC clamps to 0 so the read-back never matches.
-  # (UPower advertising max=3 does NOT prove this — see below — so it is
-  # informational only, not a pass/fail signal.)
-  local led=/sys/class/leds/asus::kbd_backlight/brightness
-  if [[ -w "$led" ]]; then
-    local orig target readback
-    orig="$(cat "$led" 2>/dev/null)"
-    # Pick a non-zero target distinct from current so a stuck-at-0 (or
-    # stuck-at-current) clamp is detectable.
-    if [[ "$orig" == "1" ]]; then target=2; else target=1; fi
-    if printf '%s' "$target" > "$led" 2>/dev/null; then
-      readback="$(cat "$led" 2>/dev/null)"
-      if [[ "$readback" == "$target" ]]; then
-        printf '  sysfs write test:      %sOK — wrote %s, read back %s (software control works)%s\n' \
-          "$c_ok" "$target" "$readback" "$c_off"
-      else
-        printf '  sysfs write test:      %sFAILED — wrote %s, read back %s (SLKB clamp; asusd not translating)%s\n' \
-          "$c_err" "$target" "$readback" "$c_off"
-      fi
-      # Restore whatever was there before the probe.
-      printf '%s' "$orig" > "$led" 2>/dev/null || true
-    else
-      printf '  sysfs write test:      %scould not write %s (permission?)%s\n' "$c_dim" "$led" "$c_off"
-    fi
+  if systemctl is-active --quiet kbd-backlight-auto 2>/dev/null; then
+    printf '  superseded by:         %skeyboard-backlight-auto (active)%s\n' "$c_ok" "$c_off"
   else
-    printf '  sysfs write test:      %sLED node not writable/present (%s)%s\n' "$c_dim" "$led" "$c_off"
-  fi
-
-  # Informational only: UPower exposes max=3 even when the fix is absent
-  # and software control is broken, so this is NOT a "fixed" indicator.
-  if command -v busctl >/dev/null 2>&1; then
-    local maxb
-    maxb="$(busctl --system call org.freedesktop.UPower /org/freedesktop/UPower/KbdBacklight \
-            org.freedesktop.UPower.KbdBacklight GetMaxBrightness 2>/dev/null \
-            | awk '{print $NF}')"
-    if [[ -n "$maxb" ]]; then
-      printf '  UPower KbdBacklight:   %smax=%s (info only — present even when control is broken)%s\n' "$c_dim" "$maxb" "$c_off"
-    fi
+    printf '  see also:              %skeyboard-backlight-auto (ambient-light control)%s\n' \
+      "$c_dim" "$c_off"
   fi
 }

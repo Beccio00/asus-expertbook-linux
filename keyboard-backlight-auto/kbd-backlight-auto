@@ -1,0 +1,724 @@
+#!/usr/bin/env python3
+"""Ambient-light driven keyboard backlight for the ASUS ExpertBook Ultra.
+
+The rules implemented here are not invented; they are taken from shipping
+implementations:
+
+  * The ambient-light-response (ALR) curve and the manual-override lookup
+    table are Microsoft's documented Windows 11 defaults for "Keyboard
+    Backlight Autobrightness":
+    https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/keyboard-backlight-implementation-guide
+
+    Note the curve is deliberately NOT monotonic. In near-darkness the
+    keyboard sits at 35%, peaks at 100% between 40 and 100 lux, then falls
+    back off and switches off entirely above 200-300 lux, where the keycap
+    legends are readable by ambient light alone and a lit keyboard only
+    hurts contrast.
+
+  * The reading smoothing is GNOME's, from gnome-settings-daemon
+    plugins/power/gsd-power-manager.c (iio_proxy_changed):
+
+        alpha = 1 / (1 + TIME_CONSTANT / dt)
+        acc   = alpha * reading + (1 - alpha) * acc
+
+    with TIME_CONSTANT = 1 / (2*pi*BANDWIDTH_HZ) and BANDWIDTH_HZ = 0.1.
+
+Hardware notes for this machine (ASUS ExpertBook Ultra B9406CAA):
+
+  * /sys/class/leds/asus::kbd_backlight/brightness accepts writes across the
+    full 0..3 range and they reach the EC, but READING it back always yields
+    0 - the firmware's query path is broken. This daemon therefore never
+    reads the current level back; it tracks what it last wrote.
+
+  * The Fn backlight keys emit NO input event. Measured on 2026-09-02 (BIOS
+    B9406CAA.312) across all 15 /dev/input/event* devices: pressing them
+    produces nothing. The "Asus WMI hotkeys" device advertises KEY_KBDILLUMUP /
+    KEY_KBDILLUMDOWN in its capability bitmap only because asus-nb-wmi's sparse
+    keymap declares them.
+
+    The kernel does report the change though, through the LED class's
+    `brightness_hw_changed` attribute (POLLPRI). That is how UPower notices -
+    it relays the change as BrightnessChangedWithSource(level, "internal"),
+    which is what raises KDE's on-screen display. Observed values 1, 2, 3, 0
+    while the keys were pressed.
+
+    Crucially `brightness_hw_changed` carries the REAL level, unlike the plain
+    `brightness` attribute above. So an EC-initiated change is both detectable
+    and readable, and it is what drives the manual override here.
+"""
+
+import argparse
+import errno
+import glob
+import math
+import os
+import re
+import select
+import signal
+import struct
+import sys
+import time
+
+CONFIG_PATH = "/etc/kbd-backlight-auto.conf"
+
+# Microsoft's default bucketized ALR curve: "<minlux>:<maxlux>:<percentage>".
+DEFAULT_CURVE = (
+    "0:6:35, 5:14:52, 12:32:70, 30:45:88, 40:100:100, "
+    "95:110:88, 105:160:70, 155:205:52, 200:300:0"
+)
+
+# Microsoft's default manual-override lookup table:
+# "<minlux>:<maxlux>:<lowerboundfactor>:<upperboundfactor>".
+DEFAULT_OVERRIDE_LUT = (
+    "0:20:1.00:1.00, 20:40:0.70:0.60, 40:150:0.60:0.60, 150:600:0.50:0.50, "
+    "600:1000:0.40:0.40, 1000:4000:0.30:0.25, 4000:10000:0.20:0.20, "
+    "10000:30000:0.15:0.10, 30000:100000:0.10:0.10"
+)
+
+DEFAULTS = {
+    "enabled": "yes",
+    "led": "/sys/class/leds/asus::kbd_backlight",
+    "interval": "1.0",
+    "bandwidth_hz": "0.1",
+    "calibration": "1.0",
+    "curve": DEFAULT_CURVE,
+    "override_lut": DEFAULT_OVERRIDE_LUT,
+    "lid_off": "yes",
+}
+
+# linux/input-event-codes.h
+EV_KEY = 0x01
+EV_SW = 0x05
+SW_LID = 0x00
+KEY_KBDILLUMTOGGLE = 228
+KEY_KBDILLUMDOWN = 229
+KEY_KBDILLUMUP = 230
+ILLUM_KEYS = (KEY_KBDILLUMTOGGLE, KEY_KBDILLUMDOWN, KEY_KBDILLUMUP)
+
+# struct input_event on 64-bit Linux: timeval (2x long) + u16 + u16 + s32
+INPUT_EVENT = struct.Struct("llHHi")
+
+
+def log(msg):
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+
+def read_text(path):
+    with open(path, "r") as fh:
+        return fh.read().strip()
+
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+
+def load_config(path=CONFIG_PATH):
+    """Read simple `key = value` lines. Unknown keys are ignored."""
+    cfg = dict(DEFAULTS)
+    try:
+        with open(path, "r") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip().lower()
+                if key in cfg:
+                    cfg[key] = val.strip()
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def as_bool(val):
+    return str(val).strip().lower() in ("1", "yes", "true", "on")
+
+
+def parse_curve(spec):
+    """Parse the ALR curve. Microsoft's validation rules apply: at least one
+    bucket, every bucket must have minlux < maxlux, and buckets must be
+    contiguous or overlapping (no gaps). Anything else -> ValueError, and the
+    caller falls back to the default curve."""
+    buckets = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        fields = part.split(":")
+        if len(fields) != 3:
+            raise ValueError("bucket %r is not <minlux>:<maxlux>:<percentage>" % part)
+        lo, hi, pct = (float(f) for f in fields)
+        if lo >= hi:
+            raise ValueError("bucket %r has minlux >= maxlux" % part)
+        if not 0.0 <= pct <= 100.0:
+            raise ValueError("bucket %r percentage out of range" % part)
+        buckets.append((lo, hi, pct))
+    if not buckets:
+        raise ValueError("curve has no buckets")
+    buckets.sort(key=lambda b: b[0])
+    for prev, nxt in zip(buckets, buckets[1:]):
+        if nxt[0] > prev[1]:
+            raise ValueError("gap between %s and %s" % (prev, nxt))
+    return buckets
+
+
+def parse_override_lut(spec):
+    """Parse the manual-override lookup table. Entries must be contiguous and
+    non-overlapping, with minlux < maxlux."""
+    rows = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        fields = part.split(":")
+        if len(fields) != 4:
+            raise ValueError(
+                "entry %r is not <minlux>:<maxlux>:<lower>:<upper>" % part)
+        lo, hi, lower, upper = (float(f) for f in fields)
+        if lo >= hi:
+            raise ValueError("entry %r has minlux >= maxlux" % part)
+        rows.append((lo, hi, lower, upper))
+    if not rows:
+        raise ValueError("override table has no entries")
+    rows.sort(key=lambda r: r[0])
+    for prev, nxt in zip(rows, rows[1:]):
+        if nxt[0] != prev[1]:
+            raise ValueError("entries %s and %s are not contiguous" % (prev, nxt))
+    return rows
+
+
+# --------------------------------------------------------------------------
+# Curve evaluation
+# --------------------------------------------------------------------------
+
+def select_bucket(buckets, lux, current):
+    """Pick the ALR bucket for `lux`.
+
+    Hysteresis comes for free from the overlapping bucket ranges: as long as
+    the reading is still inside the bucket we are already in, we stay there,
+    so a reading hovering on a boundary cannot flap between two levels.
+    """
+    if current is not None:
+        lo, hi, _ = buckets[current]
+        if lo <= lux <= hi:
+            return current
+    if lux < buckets[0][0]:
+        return 0
+    if lux > buckets[-1][1]:
+        return len(buckets) - 1
+    for idx, (lo, hi, _) in enumerate(buckets):
+        if lo <= lux <= hi:
+            return idx
+    return len(buckets) - 1
+
+
+def override_range(lut, lux):
+    """Compute the manual-override lux window around the current reading."""
+    row = None
+    for lo, hi, lower, upper in lut:
+        if lo <= lux < hi:
+            row = (lower, upper)
+            break
+    if row is None:
+        row = (lut[0][2], lut[0][3]) if lux < lut[0][0] else (lut[-1][2], lut[-1][3])
+    lower, upper = row
+    return (lux * (1.0 - lower), lux * (1.0 + upper))
+
+
+def pct_to_level(pct, max_level):
+    """Map a curve percentage onto the LED's discrete range.
+
+    A non-zero percentage never collapses to "off": on this machine the LED
+    has only four steps (0..3), so 35% would otherwise round down to 1 and
+    a smaller max would round to 0 and leave the keyboard dark in the dark.
+    """
+    if pct <= 0:
+        return 0
+    level = int(round(pct / 100.0 * max_level))
+    return max(1, min(max_level, level))
+
+
+# --------------------------------------------------------------------------
+# Hardware access
+# --------------------------------------------------------------------------
+
+class Backlight:
+    """The keyboard LED. Write-only by necessity - see the module docstring."""
+
+    def __init__(self, base):
+        self.base = base
+        self.path = os.path.join(base, "brightness")
+        self.max = int(read_text(os.path.join(base, "max_brightness")))
+        self.last = None
+
+    def set(self, level, force=False):
+        if level == self.last and not force:
+            return False
+        with open(self.path, "w") as fh:
+            fh.write(str(level))
+        self.last = level
+        return True
+
+    def forget(self):
+        """Drop our idea of the current level so the next set() always writes.
+
+        Used after anything that may have changed the level behind our back
+        that we could not observe (a lid cycle)."""
+        self.last = None
+
+    def observe(self, level):
+        """Record a level somebody else set, learned from
+        brightness_hw_changed. Unlike forget() this keeps us in sync, so the
+        next curve decision only writes if it actually differs."""
+        self.last = level
+
+
+class AmbientSensor:
+    """Ambient light sensor via the IIO sysfs interface.
+
+    Read directly from `in_illuminance_raw` rather than through
+    iio-sensor-proxy's D-Bus API: the raw attribute stays readable even while
+    the proxy has the IIO buffer claimed, and it keeps this daemon free of any
+    D-Bus dependency.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.raw = os.path.join(path, "in_illuminance_raw")
+        self.scale = self._optional("in_illuminance_scale", 1.0)
+        self.offset = self._optional("in_illuminance_offset", 0.0)
+
+    def _optional(self, name, default):
+        try:
+            return float(read_text(os.path.join(self.path, name)))
+        except (OSError, ValueError):
+            return default
+
+    def lux(self):
+        """Current reading in lux, or None if the sensor is momentarily busy."""
+        try:
+            raw = float(read_text(self.raw))
+        except (OSError, ValueError):
+            return None
+        return (raw + self.offset) * self.scale
+
+    @staticmethod
+    def find():
+        for path in sorted(glob.glob("/sys/bus/iio/devices/iio:device*")):
+            try:
+                name = read_text(os.path.join(path, "name"))
+            except OSError:
+                continue
+            if name == "als" and os.path.exists(
+                    os.path.join(path, "in_illuminance_raw")):
+                return AmbientSensor(path)
+        return None
+
+
+def parse_input_devices():
+    """Parse /proc/bus/input/devices into a list of dicts.
+
+    Avoids EVIOCGBIT ioctls; the same bitmaps are exposed here as text.
+    """
+    devices = []
+    current = {}
+    try:
+        with open("/proc/bus/input/devices", "r") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return devices
+    lines.append("")
+    for line in lines:
+        if not line.strip():
+            if current:
+                devices.append(current)
+                current = {}
+            continue
+        tag, _, rest = line.partition(": ")
+        if tag == "N":
+            match = re.search(r'Name="(.*)"', rest)
+            current["name"] = match.group(1) if match else rest
+        elif tag == "H":
+            match = re.search(r"\b(event\d+)\b", rest)
+            if match:
+                current["event"] = "/dev/input/" + match.group(1)
+        elif tag == "B":
+            key, _, bits = rest.partition("=")
+            current.setdefault("bits", {})[key.strip()] = bits.strip()
+    return devices
+
+
+def has_bit(bitmap, code):
+    """Test a bit in an input bitmap string ("...long1 long0", MSB group first)."""
+    if not bitmap:
+        return False
+    groups = [int(chunk, 16) for chunk in bitmap.split()][::-1]
+    index, offset = divmod(code, 64)
+    if index >= len(groups):
+        return False
+    return bool((groups[index] >> offset) & 1)
+
+
+def find_illum_key_devices():
+    """Input devices that emit the keyboard-backlight Fn keys."""
+    found = []
+    for dev in parse_input_devices():
+        bits = dev.get("bits", {})
+        if not dev.get("event"):
+            continue
+        if any(has_bit(bits.get("KEY", ""), code) for code in ILLUM_KEYS):
+            found.append(dev)
+    return found
+
+
+def find_lid_device():
+    """The lid switch input device, if the kernel exposes one."""
+    for dev in parse_input_devices():
+        bits = dev.get("bits", {})
+        if dev.get("event") and has_bit(bits.get("SW", ""), SW_LID):
+            return dev
+    return None
+
+
+def read_proc_lid_state():
+    """Lid state from /proc/acpi, used for the initial reading only.
+
+    Some firmware never updates this file, so once an EV_SW/SW_LID event has
+    been seen the evdev state wins.
+    """
+    for path in glob.glob("/proc/acpi/button/lid/*/state"):
+        try:
+            text = read_text(path)
+        except OSError:
+            continue
+        if "closed" in text.lower():
+            return True
+        if "open" in text.lower():
+            return False
+    return None
+
+
+# --------------------------------------------------------------------------
+# Daemon
+# --------------------------------------------------------------------------
+
+class Controller:
+    def __init__(self, cfg, dry_run=False, verbose=False):
+        self.dry_run = dry_run
+        self.verbose = verbose
+
+        self.interval = max(0.1, float(cfg["interval"]))
+        self.calibration = float(cfg["calibration"])
+        bandwidth = float(cfg["bandwidth_hz"])
+        # GNOME: time constant = 1 / (2*pi*bandwidth), in seconds here.
+        self.time_constant = 1.0 / (2.0 * math.pi * bandwidth) if bandwidth > 0 else 0.0
+        self.lid_off = as_bool(cfg["lid_off"])
+
+        self.buckets = self._parse(parse_curve, cfg["curve"], DEFAULT_CURVE, "curve")
+        self.override_lut = self._parse(
+            parse_override_lut, cfg["override_lut"], DEFAULT_OVERRIDE_LUT,
+            "override table")
+
+        self.sensor = AmbientSensor.find()
+        if self.sensor is None:
+            raise SystemExit("no ambient light sensor (iio 'als' device) found")
+
+        self.backlight = Backlight(cfg["led"])
+
+        self.accumulator = None
+        self.bucket = None
+        self.override = None
+        self.lid_closed = bool(read_proc_lid_state()) if self.lid_off else False
+        self.lid_from_evdev = False
+        self.last_time = None
+
+    @staticmethod
+    def _parse(parser, spec, fallback, what):
+        try:
+            return parser(spec)
+        except ValueError as exc:
+            log("config: invalid %s (%s); using the default" % (what, exc))
+            return parser(fallback)
+
+    # -- readings ---------------------------------------------------------
+
+    def sample(self):
+        """One smoothed lux reading, or None if the sensor gave nothing."""
+        raw = self.sensor.lux()
+        if raw is None:
+            return None
+        lux = max(0.0, raw * self.calibration)
+        now = time.monotonic()
+        if self.accumulator is None or self.time_constant <= 0:
+            self.accumulator = lux
+        else:
+            dt = now - self.last_time
+            alpha = 1.0 / (1.0 + (self.time_constant / dt)) if dt > 0 else 0.0
+            self.accumulator = alpha * lux + (1.0 - alpha) * self.accumulator
+        self.last_time = now
+        return self.accumulator
+
+    # -- events -----------------------------------------------------------
+
+    def on_illum_key(self):
+        """An Fn backlight key was pressed.
+
+        The EC has already changed the brightness in hardware and we cannot
+        read the new value back, so the override here means "hands off" rather
+        than "hold percentage X": we stop writing until the ambient reading
+        leaves the override window, then the curve takes over again.
+
+        On the reference machine this never fires - see the module docstring;
+        the EC swallows the keypress without telling the OS.
+        """
+        lux = self.accumulator if self.accumulator is not None else 0.0
+        self.override = override_range(self.override_lut, lux)
+        self.backlight.forget()
+        log("Fn key pressed | manual override active for %.1f-%.1f lux (reading %.1f)"
+            % (self.override[0], self.override[1], lux))
+
+    def on_hw_changed(self, level):
+        """The EC changed the brightness behind our back - an Fn keypress.
+
+        `brightness_hw_changed` reports the real new level, so unlike the Fn
+        evdev path we learn what the user actually chose. A value equal to what
+        we last wrote is our own change echoing back through the driver, not a
+        user action, so it must not start an override.
+        """
+        if level == self.backlight.last:
+            return
+        lux = self.accumulator if self.accumulator is not None else 0.0
+        self.override = override_range(self.override_lut, lux)
+        self.backlight.observe(level)
+        log("EC set level %d/%d | manual override active for %.1f-%.1f lux "
+            "(reading %.1f)"
+            % (level, self.backlight.max, self.override[0], self.override[1],
+               lux))
+
+    def on_lid(self, closed):
+        if closed == self.lid_closed:
+            return
+        self.lid_closed = closed
+        # The environment the user set the level in is gone; let the curve
+        # decide again once the lid comes back up.
+        self.override = None
+        self.backlight.forget()
+        log("lid %s" % ("closed" if closed else "opened"))
+
+    # -- main step --------------------------------------------------------
+
+    def step(self):
+        lux = self.sample()
+        if lux is None:
+            return
+
+        if self.lid_off and self.lid_closed:
+            self.apply(0, lux, "lid closed")
+            return
+
+        if self.override is not None:
+            low, high = self.override
+            if low <= lux <= high:
+                if self.verbose:
+                    log("%.1f lux | manual override (%.1f-%.1f) | not touching"
+                        % (lux, low, high))
+                return
+            self.override = None
+            log("%.1f lux | left override window, resuming curve" % lux)
+
+        self.bucket = select_bucket(self.buckets, lux, self.bucket)
+        pct = self.buckets[self.bucket][2]
+        self.apply(pct_to_level(pct, self.backlight.max), lux,
+                   "bucket %d (%g-%g lux, %g%%)"
+                   % (self.bucket + 1, self.buckets[self.bucket][0],
+                      self.buckets[self.bucket][1], pct))
+
+    def apply(self, level, lux, why):
+        if self.dry_run:
+            if level != self.backlight.last:
+                log("%.1f lux | %s | would set level %d/%d"
+                    % (lux, why, level, self.backlight.max))
+                self.backlight.last = level
+            elif self.verbose:
+                log("%.1f lux | %s | level %d/%d (unchanged)"
+                    % (lux, why, level, self.backlight.max))
+            return
+        try:
+            changed = self.backlight.set(level)
+        except OSError as exc:
+            log("cannot write %s: %s" % (self.backlight.path, exc))
+            return
+        if changed or self.verbose:
+            log("%.1f lux | %s | level %d/%d" % (lux, why, level, self.backlight.max))
+
+
+def run(controller):
+    poller = select.poll()
+    fds = {}
+
+    def watch(path, mask):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            log("cannot open %s: %s" % (path, exc))
+            return None
+        poller.register(fd, mask)
+        fds[fd] = path
+        return fd
+
+    key_fds = set()
+    for dev in find_illum_key_devices():
+        fd = watch(dev["event"], select.POLLIN)
+        if fd is not None:
+            key_fds.add(fd)
+            log("watching %s (%s) for backlight Fn keys (secondary — this EC "
+                "sends no input event; brightness_hw_changed is the real one)"
+                % (dev["event"], dev.get("name", "?")))
+    if not key_fds:
+        log("no backlight Fn key device found")
+
+    # The primary manual-override signal. The Fn keys reach the OS this way on
+    # hardware whose EC swallows the keypress without emitting an input event -
+    # which is the case on this laptop. It also carries the real level.
+    hw_fd = None
+    hw_path = os.path.join(controller.backlight.base, "brightness_hw_changed")
+    if os.path.exists(hw_path):
+        try:
+            hw_fd = os.open(hw_path, os.O_RDONLY)
+            try:
+                os.read(hw_fd, 32)     # drain the initial state
+            except OSError:
+                pass                   # ENODATA until something changes
+            poller.register(hw_fd, select.POLLPRI | select.POLLERR)
+            fds[hw_fd] = hw_path
+            log("watching %s for EC-initiated changes" % hw_path)
+        except OSError as exc:
+            log("cannot open %s: %s" % (hw_path, exc))
+            hw_fd = None
+    if hw_fd is None and not key_fds:
+        log("no manual-override signal available")
+
+    lid_fd = None
+    if controller.lid_off:
+        lid = find_lid_device()
+        if lid:
+            lid_fd = watch(lid["event"], select.POLLIN)
+        if lid_fd is not None:
+            log("watching %s (%s) for lid events"
+                % (lid["event"], lid.get("name", "?")))
+        else:
+            log("no readable lid switch device; falling back to /proc/acpi polling")
+
+    running = [True]
+
+    def stop(_signum, _frame):
+        running[0] = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    next_tick = time.monotonic()
+    while running[0]:
+        timeout = max(0.0, next_tick - time.monotonic())
+        try:
+            events = poller.poll(timeout * 1000.0)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+        for fd, _mask in events:
+            if fd == hw_fd:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    level = int(os.read(fd, 32).decode().strip())
+                except (OSError, UnicodeDecodeError, ValueError):
+                    continue
+                controller.on_hw_changed(level)
+                continue
+            try:
+                data = os.read(fd, INPUT_EVENT.size * 64)
+            except OSError:
+                continue
+            for offset in range(0, len(data) - INPUT_EVENT.size + 1,
+                                INPUT_EVENT.size):
+                _sec, _usec, etype, code, value = INPUT_EVENT.unpack_from(data, offset)
+                if fd in key_fds and etype == EV_KEY and code in ILLUM_KEYS and value == 1:
+                    controller.on_illum_key()
+                elif fd == lid_fd and etype == EV_SW and code == SW_LID:
+                    controller.lid_from_evdev = True
+                    controller.on_lid(bool(value))
+
+        now = time.monotonic()
+        if now >= next_tick:
+            if controller.lid_off and not controller.lid_from_evdev:
+                state = read_proc_lid_state()
+                if state is not None:
+                    controller.on_lid(state)
+            controller.step()
+            next_tick = now + controller.interval
+
+    for fd in fds:
+        os.close(fd)
+
+
+def print_status(cfg, controller):
+    log("config file:      %s%s"
+        % (CONFIG_PATH, "" if os.path.exists(CONFIG_PATH) else " (absent, using defaults)"))
+    log("sensor:           %s (scale=%g offset=%g)"
+        % (controller.sensor.path, controller.sensor.scale, controller.sensor.offset))
+    raw = controller.sensor.lux()
+    log("reading:          %s lux (calibration %g)"
+        % ("unavailable" if raw is None else "%.2f" % (raw * controller.calibration),
+           controller.calibration))
+    log("led:              %s (max %d)" % (controller.backlight.base, controller.backlight.max))
+    lid = read_proc_lid_state()
+    log("lid:              %s" % ("unknown" if lid is None else ("closed" if lid else "open")))
+    dev = find_lid_device()
+    log("lid device:       %s" % (dev["event"] if dev else "none"))
+    keys = find_illum_key_devices()
+    log("fn key devices:   %s" % (", ".join(d["event"] for d in keys) or "none"))
+    log("smoothing:        bandwidth %s Hz (time constant %.2f s)"
+        % (cfg["bandwidth_hz"], controller.time_constant))
+    log("curve (%d buckets, level out of %d):" % (len(controller.buckets), controller.backlight.max))
+    for idx, (lo, hi, pct) in enumerate(controller.buckets, 1):
+        log("  %d) %7g - %7g lux  ->  %3g%%  ->  level %d"
+            % (idx, lo, hi, pct, pct_to_level(pct, controller.backlight.max)))
+
+
+def main():
+    global CONFIG_PATH
+
+    parser = argparse.ArgumentParser(
+        description="Ambient-light driven keyboard backlight.")
+    parser.add_argument("--config", default=CONFIG_PATH,
+                        help="configuration file (default: %s)" % CONFIG_PATH)
+    parser.add_argument("--probe", action="store_true",
+                        help="run the control loop read-only, printing what it "
+                             "would do without touching the backlight")
+    parser.add_argument("--status", action="store_true",
+                        help="print the resolved configuration and exit")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="log every tick, not just changes")
+    args = parser.parse_args()
+
+    CONFIG_PATH = args.config
+    cfg = load_config(args.config)
+
+    controller = Controller(cfg, dry_run=args.probe, verbose=args.verbose)
+
+    if args.status:
+        print_status(cfg, controller)
+        return 0
+
+    if not as_bool(cfg["enabled"]) and not args.probe:
+        log("disabled in %s (enabled = no); exiting" % args.config)
+        return 0
+
+    run(controller)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
