@@ -662,11 +662,12 @@ operations know whether each module is `up to date`, `update available`,
   |---|---|---|
   | `touchpad-fix` | works | config files only, nothing distro-specific |
   | `wifi-fix` | works | config files only |
+  | `keyboard-backlight-auto` | works | config files plus a python3 daemon and its unit; no package manager involved |
   | `intel-perf-fix` | partial | `thermald` works. `intel-lpmd` is absent on Debian and, on Ubuntu 24.04, too old (0.0.3) to recognise Panther Lake — it installs and exits at once. Both cases are reported, not hidden |
   | `display-fix` | not yet | needs the cmdline backend wired into the module |
   | `audio-fix` | not yet | DKMS builds, but the `NoExtract` UCM pin has no direct equivalent (closest is `dpkg-divert`) |
   | `camera-firmware` | not yet | needs `fwupd`, `jq`, `7z`, `curl` mapped to Debian names |
-  | `webcam-ai-fix`, `keyboard-backlight-fix` | not planned | depend on AUR-only packages (`obs-backgroundremoval`, `asusctl`) |
+  | `webcam-ai-fix`, `keyboard-backlight-fix` | not planned | depend on AUR-only packages (`obs-backgroundremoval`, `asusctl`); `keyboard-backlight-fix` is superseded by `keyboard-backlight-auto` anyway |
 
   Tracking issue: [#4](https://github.com/burakgon/asus-expertbook-linux/issues/4).
 - **Bootloader assumption (display-fix):** `limine` via

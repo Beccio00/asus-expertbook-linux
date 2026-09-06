@@ -242,9 +242,9 @@ case "$(distro_family)" in
     ;;
   debian)
     ok "${pretty:-Debian (or derivative)} — apt/dpkg"
-    note "supported so far: intel-perf-fix, plus every module whose payload is"
-    note "plain config files (touchpad-fix, wifi-fix). The remaining modules still"
-    note "assume Arch — see issue #4 for the cross-distro port status."
+    note "supported so far: intel-perf-fix, plus every module that only ships"
+    note "files and units (touchpad-fix, wifi-fix, keyboard-backlight-auto)."
+    note "The rest still assume Arch — see issue #4 for the port status."
     ;;
   *)
     warn "${pretty:-unknown distribution} — no supported package manager detected"
