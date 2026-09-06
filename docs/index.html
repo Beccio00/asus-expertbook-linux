@@ -893,9 +893,13 @@ kwin_wayland: Pageflip timed out! This is a bug in the xe kernel driver</code></
         <p>
           This is the first module ported off <code>pacman</code>: package and
           service calls go through <code>lib/distro.sh</code>, so the same hook
-          runs on apt systems too. Where <code>intel-lpmd</code> is unavailable
-          the module installs <code>thermald</code> alone and says so, rather
-          than failing.
+          runs on apt systems too. On Debian and Ubuntu only the
+          <code>thermald</code> half currently works: Debian has no
+          <code>intel-lpmd</code> package, and Ubuntu 24.04 ships 0.0.3
+          (February 2024), which predates Panther Lake and exits within
+          milliseconds of starting. The module reports both cases at install
+          time and in <code>status</code> rather than leaving a daemon that
+          looks enabled but is dead.
         </p>
         <p>
           Both daemons coexist with the existing <code>power-profiles-daemon</code>:

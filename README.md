@@ -388,11 +388,18 @@ all idle work concentrates on a single LP-E core and the P-cores deep-sleep.
 | `thermald` | `extra` | `main` | `thermald.service` | P/E-core-aware thermal throttle. |
 | `intel-lpmd` | `extra` / `cachyos` | `universe` (Ubuntu 24.04+); **not in Debian** | `intel_lpmd.service` | Parks idle work on LP-E core, lets P-cores deep-sleep. |
 
-The package names happen to match across both families. Where `intel-lpmd`
-is missing the module says so and installs `thermald` alone rather than
-failing — half the win is still worth having. The service unit name is
-resolved at runtime (`svc_unit`) instead of hardcoded, because it is a
-packaging decision each distribution makes independently.
+The package names happen to match across both families, and so does the unit
+name — though it is resolved at runtime (`svc_unit`) rather than hardcoded,
+because that is a packaging decision each distribution makes independently.
+
+**On Debian and Ubuntu you get the thermald half only, for now.** Debian has no
+`intel-lpmd` package at all. Ubuntu 24.04 has one, but it is 0.0.3 (February
+2024), which predates Panther Lake: it installs, the unit enables, and the
+daemon exits within milliseconds on CPU family 6 model 204 without logging a
+reason. Verified on Pop!_OS 24.04. The module reports this at install time and
+in `status` instead of leaving you to believe the idle-power win is active. The
+unit is left enabled on purpose, so a later package upgrade starts working
+without re-running anything.
 
 Both coexist with the existing `power-profiles-daemon` (PPD handles user
 profile, thermald handles thermal, intel-lpmd handles idle topology).
@@ -655,7 +662,7 @@ operations know whether each module is `up to date`, `update available`,
   |---|---|---|
   | `touchpad-fix` | works | config files only, nothing distro-specific |
   | `wifi-fix` | works | config files only |
-  | `intel-perf-fix` | works | `thermald` in main; `intel-lpmd` in Ubuntu universe, absent on Debian and skipped with a warning |
+  | `intel-perf-fix` | partial | `thermald` works. `intel-lpmd` is absent on Debian and, on Ubuntu 24.04, too old (0.0.3) to recognise Panther Lake — it installs and exits at once. Both cases are reported, not hidden |
   | `display-fix` | not yet | needs the cmdline backend wired into the module |
   | `audio-fix` | not yet | DKMS builds, but the `NoExtract` UCM pin has no direct equivalent (closest is `dpkg-divert`) |
   | `camera-firmware` | not yet | needs `fwupd`, `jq`, `7z`, `curl` mapped to Debian names |

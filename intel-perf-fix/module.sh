@@ -17,6 +17,10 @@
 #                           LP-E cluster rather than offlining the P-cores.
 #                           Arch: extra/cachyos. Ubuntu: universe (24.04+).
 #                           Not in Debian yet, so its absence is tolerated.
+#                           Caveat: Ubuntu 24.04 ships 0.0.3 (Feb 2024), which
+#                           exits immediately on Panther Lake (family 6 model
+#                           204) because it predates it. Verified on Pop!_OS
+#                           24.04. The install hook reports this.
 #
 # We deliberately DO NOT touch:
 #   - The Hyprland-only toggles (Omarchy is Hyprland-based; we run KDE Plasma
@@ -59,6 +63,18 @@ module_post_install() {
     unit="$(svc_unit intel_lpmd.service intel-lpmd.service)"
     echo "  enabling $unit"
     svc_enable_now "$unit" 2>&1 | tail -1 || true
+
+    # intel_lpmd exits immediately on a CPU model it predates, without logging
+    # a reason. Ubuntu 24.04 ships 0.0.3 (Feb 2024), which does not know
+    # Panther Lake, so the unit enables and the daemon is dead a few ms later.
+    # Say so instead of leaving the user thinking they got the idle-power win.
+    if ! svc_is_active "$unit"; then
+      warn "$unit was enabled but is not running"
+      echo "  intel-lpmd $(pkg_version intel-lpmd) exits on CPU models it does not"
+      echo "  recognise. Panther Lake needs a newer release than this distribution"
+      echo "  ships. The unit stays enabled, so a later package upgrade starts"
+      echo "  working without re-running this module."
+    fi
   else
     # Debian has no intel-lpmd package (Ubuntu carries it in universe).
     # thermald alone still covers the thermal half, so a missing intel-lpmd is
@@ -112,4 +128,11 @@ module_status_extra() {
       printf '  %-22s %snot installed%s\n' "$svc pkg:" "$c_warn" "$c_off"
     fi
   done
+
+  # Explain a dead intel_lpmd rather than leaving a bare "inactive" above.
+  svc="$(svc_unit intel_lpmd.service intel-lpmd.service)"
+  if svc_exists "$svc" && ! svc_is_active "$svc" && pkg_installed intel-lpmd; then
+    printf '  %-22s %sinstalled but exits at startup — too old for this CPU%s\n' \
+      "intel-lpmd:" "$c_warn" "$c_off"
+  fi
 }
