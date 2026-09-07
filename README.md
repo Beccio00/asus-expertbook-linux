@@ -665,7 +665,7 @@ operations know whether each module is `up to date`, `update available`,
   | `keyboard-backlight-auto` | works | config files plus a python3 daemon and its unit; no package manager involved |
   | `intel-perf-fix` | partial | `thermald` works. `intel-lpmd` is absent on Debian and, on Ubuntu 24.04, too old (0.0.3) to recognise Panther Lake — it installs and exits at once. Both cases are reported, not hidden |
   | `display-fix` | not yet | needs the cmdline backend wired into the module |
-  | `audio-fix` | not yet | DKMS builds, but the `NoExtract` UCM pin has no direct equivalent (closest is `dpkg-divert`) |
+  | `audio-fix` | not yet | Three blockers, all measured on Pop!_OS 24.04. The DKMS source compiles cleanly against a current kernel, but `dkms.conf` hardcodes `LLVM=1` and `audio_require_build_tools` demands `clang`, while Debian-family kernels are `CONFIG_CC_IS_GCC`. The per-kernel `dkms install` loop aborts the whole install on the first kernel whose API the source predates — not Debian-specific; `audio-fix` has neither the `BUILD_EXCLUSIVE_KERNEL` guard nor the skip-and-warn that #12 uses. And the bundled UCM files declare Syntax 7, which needs alsa-lib >= 1.2.12; Ubuntu 24.04 ships 1.2.11, so installing them breaks UCM for the whole `sof-soundwire` family. The `NoExtract` pin maps to `dpkg-divert` |
   | `camera-firmware` | not yet | needs `fwupd`, `jq`, `7z`, `curl` mapped to Debian names |
   | `webcam-ai-fix`, `keyboard-backlight-fix` | not planned | depend on AUR-only packages (`obs-backgroundremoval`, `asusctl`); `keyboard-backlight-fix` is superseded by `keyboard-backlight-auto` anyway |
 
