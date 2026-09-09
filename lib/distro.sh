@@ -289,20 +289,54 @@ _grub_options() {
     "$GRUB_FILE" | tail -n1
 }
 
+# _grub_write_options <new-cmdline> -- replace GRUB_CMDLINE_LINUX_DEFAULT.
+#
+# The replacement is atomic. Truncating the live file and rewriting it in place
+# would leave an empty or half-written /etc/default/grub if the write were cut
+# short, which is not a risk worth taking on a bootloader config. Instead the
+# new content is staged beside the target and renamed over it in one step.
+#
+# Two details the obvious version gets wrong:
+#   - the staging file must live in the target's own directory. mktemp defaults
+#     to /tmp, which is frequently a separate filesystem, and rename(2) across
+#     filesystems is not atomic -- mv silently degrades to copy-then-unlink.
+#   - rename installs a new inode, so mode and ownership have to be carried
+#     over explicitly; the previous in-place write got them for free.
+#
+# GRUB_FILE may be a symlink (and is one in some /etc layouts), so resolve it
+# first: the rename has to land on the real file rather than replace the link.
+# Returns non-zero without touching the target when staging or writing fails.
 _grub_write_options() {
-  local new="$1" tmp
-  tmp="$(mktemp)"
-  awk -v repl="GRUB_CMDLINE_LINUX_DEFAULT=\"$new\"" '
+  local new="$1" target dir tmp
+  target="$(readlink -f -- "$GRUB_FILE" 2>/dev/null || printf '%s\n' "$GRUB_FILE")"
+  dir="$(dirname -- "$target")"
+
+  tmp="$(mktemp -- "$dir/.grub.XXXXXX")" || {
+    warn "cannot stage a replacement for $target in $dir"
+    return 1
+  }
+  chmod --reference="$target" -- "$tmp" 2>/dev/null || true
+  chown --reference="$target" -- "$tmp" 2>/dev/null || true
+
+  if ! awk -v repl="GRUB_CMDLINE_LINUX_DEFAULT=\"$new\"" '
     /^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=/ {
       if (!seen) { print repl; seen = 1 }
       next
     }
     { print }
     END { if (!seen) print repl }
-  ' "$GRUB_FILE" > "$tmp"
-  # Write through the existing inode so mode and ownership survive.
-  cat -- "$tmp" > "$GRUB_FILE"
-  rm -f -- "$tmp"
+  ' "$target" > "$tmp"; then
+    rm -f -- "$tmp"
+    warn "failed to build the replacement for $target"
+    return 1
+  fi
+
+  mv -f -- "$tmp" "$target" || {
+    rm -f -- "$tmp"
+    warn "failed to install the new $target"
+    return 1
+  }
+
   if command -v update-grub >/dev/null 2>&1; then
     update-grub
   elif command -v grub-mkconfig >/dev/null 2>&1; then
@@ -381,7 +415,7 @@ cmdline_add() {
       if (( changed )); then
         opts="${opts#"${opts%%[![:space:]]*}"}"
         opts="${opts%"${opts##*[![:space:]]}"}"
-        _grub_write_options "$opts"
+        _grub_write_options "$opts" || rc=1
       fi
       ;;
     *)
@@ -433,7 +467,7 @@ cmdline_remove() {
       done
       if (( changed )); then
         new="${new%"${new##*[![:space:]]}"}"
-        _grub_write_options "$new"
+        _grub_write_options "$new" || rc=1
       fi
       ;;
     *)
