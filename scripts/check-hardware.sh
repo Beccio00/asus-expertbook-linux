@@ -260,15 +260,28 @@ all_pass=1
 [[ "$cpu" == *"Core(TM) Ultra"* ]] || all_pass=0
 
 if (( all_pass == 1 )); then
-  printf '%sResult: install-all is appropriate for this hardware.%s\n' "$c_ok" "$c_off"
-  if [[ "$(distro_family)" != arch ]]; then
-    printf '%sModules that install packages from the AUR (webcam-ai-fix,\n' "$c_dim"
-    printf 'keyboard-backlight-fix) are still Arch-only: install-all runs them but\n'
-    printf 'they will not install anything here.%s\n' "$c_off"
+  # install-all is not harmless outside Arch. webcam-ai-fix declares no
+  # module_install, so mod_install_files runs whatever the distro: it drops
+  # /etc/modules-load.d/v4l2loopback.conf for a module Debian does not package,
+  # leaving systemd-modules-load to fail at every boot, and its post-install
+  # adds the invoking user to the render group. So name the ported modules here
+  # rather than claim the Arch-only ones do nothing.
+  if [[ "$(distro_family)" == arch ]]; then
+    install_cmd='./patch.sh install-all'
+    printf '%sResult: install-all is appropriate for this hardware.%s\n' "$c_ok" "$c_off"
+  else
+    install_cmd='./patch.sh install touchpad-fix wifi-fix keyboard-backlight-auto intel-perf-fix'
+    printf '%sResult: the hardware matches. Install the ported modules, not install-all.%s\n' \
+      "$c_ok" "$c_off"
+    printf '%sinstall-all would also run the Arch-only modules. webcam-ai-fix still\n' "$c_dim"
+    printf 'writes its modules-load.d and modprobe.d files and adds you to the render\n'
+    printf 'group, even though v4l2loopback-dkms and obs-backgroundremoval cannot be\n'
+    printf 'installed here. keyboard-backlight-fix is the harmless one: it skips itself\n'
+    printf 'on every distro, superseded by keyboard-backlight-auto.%s\n' "$c_off"
   fi
   printf '\n  git clone https://github.com/burakgon/asus-expertbook-linux.git\n'
   printf '  cd asus-expertbook-linux\n'
-  printf '  ./patch.sh install-all\n'
+  printf '  %s\n' "$install_cmd"
   printf '  sudo reboot\n\n'
 else
   printf '%sResult: not a perfect match.%s Some modules may still help — pick à la carte\n' "$c_warn" "$c_off"
